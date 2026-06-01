@@ -1,0 +1,175 @@
+Stack Tecnológico de Argos — Especificación Completa
+1. Orquestador Central
+Lenguaje: Python 3.12+
+Por qué:
+
+Es tu lenguaje principal. La velocidad de desarrollo para lógica compleja (planificación, árboles de decisión, ML) es inigualable.
+
+El ecosistema de librerías científicas y de seguridad (Scapy, Impacket, PyTorch) no tiene equivalente en otros lenguajes.
+
+Los módulos críticos en rendimiento se pueden escribir en Rust/C y bindear con PyO3/cffi.
+
+Componentes y librerías:
+
+Componente	Tecnología	Justificación
+Planificador de rutas	NetworkX + custom A*	NetworkX es el estándar de grafos en Python. Para rendimiento extremo, la heurística se escribe en Cython.
+Motor de decisiones tácticas	Python puro con árboles de decisión definidos en YAML	La lógica de playbooks no necesita alto rendimiento; YAML permite a los operadores modificar playbooks sin tocar código.
+RL / Aprendizaje	PyTorch 2.x + Gymnasium	PyTorch para redes neuronales; Gymnasium para simular entornos de pentest y entrenar agentes.
+Memoria operacional (SQL)	SQLAlchemy + SQLite	SQLite local para cada misión; SQLAlchemy para abstraer y migrar a PostgreSQL si es multi-usuario.
+Memoria operacional (Vector DB)	Qdrant (embebido)	Alternativa más ligera que Weaviate; base de datos vectorial que corre en el mismo proceso, sin servidor externo.
+Bus de eventos interno	gRPC + Protocol Buffers	Comunicación entre el orquestador y los agentes de campo. Elegido sobre RabbitMQ/ZeroMQ porque no requiere broker, es binario, rápido y tipado.
+Comunicación con agentes externos	WebSocket + Protobuf sobre HTTPS	Para agentes en el objetivo. WebSocket permite duplex y streaming. Protobuf compacta los mensajes.
+Fingerprinting de servicios	Scapy (paquetes raw) + Netmiko (SSH/Telnet) + WinRM (pywinrm)	Scapy para escaneo TCP SYN; Netmiko para dispositivos de red; pywinrm para gestión remota Windows (si se necesita).
+Exploits y módulos	Python nativo + ctypes (syscalls)	Ejecución de shellcode vía VirtualAlloc/mmap. Los exploits heredados de Wormy se reutilizan aquí.
+Autenticación y autorización	FastAPI + JWT + RBAC	FastAPI para API REST del dashboard; JWT para sesiones de operador; RBAC para roles (admin, operator, viewer).
+Cola de decisiones	FastAPI WebSocket + Redis Pub/Sub (opcional)	La cola de decisiones se sirve vía WebSocket al dashboard. Redis solo si hay múltiples operadores simultáneos.
+Auto-Reportería	Jinja2 (plantillas HTML) + WeasyPrint (PDF) + json2html (MITRE)	Jinja2 para informes HTML; WeasyPrint para conversión a PDF; MITRE ATT&CK mapping exportado como JSON compatible con Navigator.
+2. Agentes de Campo (ejecutados en el objetivo)
+Lenguaje principal: Go 1.22+
+Por qué:
+
+Compilación cruzada trivial: un solo comando genera binarios para Windows (amd64/arm64), Linux (amd64/arm64) y macOS.
+
+Sin dependencias externas en el binario final. Ideal para stagers ligeros.
+
+Buen equilibrio entre rendimiento y facilidad de desarrollo (frente a Rust, que es más verboso).
+
+garble para ofuscación de strings y símbolos.
+
+Lenguaje secundario: Rust (nightly, solo para componentes de kernel o rendimiento extremo)
+Por qué:
+
+Para el rootkit o componentes que necesiten acceso a bajo nivel con seguridad de memoria.
+
+El ecosistema windows-rs y nix permite hacer syscalls directas sin unsafe.
+
+Se usa solo para el stager "heavy" que incluye rootkit, no para el resto de agentes.
+
+Componentes y librerías (Go):
+
+Componente	Librería Go	Justificación
+Stager principal	syscall, golang.org/x/sys/windows	Para VirtualAlloc, CreateThread, etc. en Windows; mmap en Linux.
+C2 cliente	gorilla/websocket + google.golang.org/protobuf	WebSocket + Protobuf para comunicarse con el orquestador.
+Ocultación de tráfico	crypto/tls (forzar JA3) + utls	uTLS permite fingerprinting TLS personalizado (Chrome, Firefox, etc.).
+Keylogging (Windows)	syscall + golang.org/x/sys/windows	SetWindowsHookEx o raw input.
+Escaneo de red interno	net + gopacket (libpcap bindings)	Para escaneo SYN sigiloso desde dentro.
+Persistencia (Windows)	golang.org/x/sys/windows/registry	Registry Run keys, Scheduled Tasks vía COM.
+Persistencia (Linux)	os + os/exec (systemd, cron)	Crear unidades systemd, entradas cron.
+Rootkit (driver)	Rust compilado aparte, cargado desde Go vía windows-sys	El driver se compila con WDK, se empaqueta como recurso embebido en Go con embed.
+Compilación	garble (ofuscación) + xgo (cross-compile)	Garble elimina strings y símbolos de Go runtime; xgo para compilar a múltiples plataformas desde un solo host.
+3. Drivers y Rootkits (Ring 0)
+Lenguaje: Rust (con ecosistema windows-rs y linux-kernel-module crate)
+Por qué:
+
+Seguridad de memoria sin garbage collector, crítico en kernel.
+
+El crate windows-rs de Microsoft es oficial y da acceso completo a la API del kernel.
+
+Para Linux, el crate linux-kernel-module permite escribir LKMs en Rust estable.
+
+Componentes:
+
+Componente	Tecnología	Justificación
+Driver Windows	Rust + windows-rs (WDK bindings) + ntapi	DKOM, manipulación de EPROCESS, protección PPL, ocultación de puertos.
+LKM Linux	Rust + linux-kernel-module crate	Hook de syscall table, ocultación de archivos/procesos.
+eBPF Linux	C (libbpf) o Rust (libbpf-rs)	Programas eBPF para ocultación de tráfico y procesos sin módulo de kernel.
+Carga del driver	Go (desde el stager) usando embed.FS	El driver .sys/.ko va embebido en el binario Go y se extrae/instala en tiempo de ejecución.
+4. Base de Datos y Almacenamiento
+Componente	Tecnología	Ubicación
+Configuración de misión	YAML	Servidor del operador
+Estado de la misión (en caliente)	SQLite (WAL mode)	Servidor del operador
+Logs y auditoría	SQLite + Loguru (logs estructurados)	Servidor + agentes (logs locales cifrados)
+Memoria de exploits/credenciales (vector)	Qdrant (embebido)	Servidor del operador
+Base de conocimiento multi-misión	PostgreSQL 16	Servidor central (compartido entre operaciones)
+Archivos de evidencias	Sistema de archivos local	Servidor + cifrado AES-GCM en reposo
+5. Frontend — Dashboard del Operador
+Componente	Tecnología	Justificación
+Framework web	React 18 + TypeScript	Estándar para dashboards interactivos. TypeScript evita bugs en lógica de UI.
+Grafo de red interactivo	Cytoscape.js o react-flow	Representación visual del Modelo de Mundo en tiempo real.
+Comunicación con backend	gRPC-Web + Protobuf	Conexión tipada y eficiente con el orquestador.
+Cola de decisiones en tiempo real	WebSocket (server-sent events)	Actualizaciones push al operador sin polling.
+Terminal web	Xterm.js + WebSocket	Si el operador quiere una shell interactiva en un agente.
+Empaquetado	Vite + Electron (para aplicación de escritorio)	Vite para desarrollo rápido; Electron para empaquetar como app nativa si se desea.
+6. CLI del Operador
+Componente	Tecnología	Justificación
+TUI interactiva	Rich + Textual (Python)	Textual es un framework reactivo para TUIs en Python. Soporta temas, layouts, animaciones.
+Comunicación con orquestador	gRPC (misma API que el dashboard)	Reutiliza los mismos stubs de Protobuf.
+Consola de comandos	Custom con cmd2 o click	Autocompletado, historial, ayuda contextual.
+7. Infraestructura de Desarrollo
+Componente	Tecnología
+Control de versiones	Git + GitHub/GitLab (privado)
+CI/CD	GitHub Actions o GitLab CI
+Compilación cruzada (Go)	xgo (Docker con toolchains para cada OS/arch)
+Compilación cruzada (Rust)	cross (Docker con toolchains específicos)
+Ofuscación de binarios	garble (Go), obfstr (Rust), PyArmor (Python ofuscado opcional)
+Empaquetado de payloads	Scripts Python + UPX para compresión
+Pruebas unitarias (Python)	pytest + hypothesis (property-based testing)
+Pruebas unitarias (Go)	testing estándar + testify
+Pruebas de integración	Docker Compose con laboratorio vulnerable automático
+Documentación	MkDocs Material + mermaid (diagramas)
+8. Librerías Externas Clave (Detalle)
+Seguridad y explotación:
+
+Impacket (Python): SMB, Kerberos, WMI, Pass-the-Hash.
+
+Scapy (Python): Paquetes raw, escaneo SYN, manipulación de red.
+
+Nuclei (Go, vía subprocess): Escaneo de vulnerabilidades web.
+
+Metasploit RPC (Python, pymetasploit3): Exploits de reserva.
+
+ML e IA:
+
+PyTorch 2.x: Entrenamiento e inferencia de modelos DQN para el planificador.
+
+Transformers (Hugging Face): Modelos LLM locales (Mistral 7B o Phi-3) para generación de comandos adaptativos y análisis de contexto.
+
+Sentence-Transformers: Para generar embeddings de banners, configuraciones y logs.
+
+ONNX Runtime: Para exportar modelos a formato portable y ejecutarlos en Go (si es necesario).
+
+Red y comunicaciones:
+
+gRPC / Protobuf: Esquema de mensajes tipado y eficiente (menos overhead que JSON/REST).
+
+WebSocket (gorilla/websocket en Go, websockets en Python): Canal bidireccional para C2.
+
+uTLS (Go): Fingerprinting TLS personalizado para evasión.
+
+Persistencia y almacenamiento:
+
+SQLite (WAL mode): Rápido, portable, embebido.
+
+Qdrant (Python client): Vector DB para similitud semántica (buscar exploits similares a servicios detectados).
+
+Redis (opcional): Para cache y cola de decisión multi-operador.
+
+Dashboard y UI:
+
+FastAPI + Uvicorn: API REST asíncrona de alto rendimiento.
+
+React + TypeScript + Vite: Frontend moderno y rápido de desarrollar.
+
+Cytoscape.js: Grafos interactivos para el mapa de red.
+
+Xterm.js: Terminal web interactiva.
+
+9. Elección de Protocolos de Comunicación Interna
+Comunicación	Protocolo	Justificación
+Orquestador ↔ Agente (C2)	WebSocket + Protobuf sobre HTTPS	WebSocket permite streaming y duplex; Protobuf binario es compacto; HTTPS camufla el tráfico.
+Orquestador ↔ Dashboard web	gRPC-Web + Protobuf	gRPC-Web permite comunicación tipada con el frontend sin REST manual.
+Orquestador ↔ CLI	gRPC nativo + Protobuf	Misma API que el dashboard, sin traducción.
+Agente ↔ Agente (P2P)	Noise Protocol + TCP/UDP	Noise es un protocolo criptográfico moderno (usado por WireGuard) para cifrado P2P con forward secrecy.
+Orquestador ↔ Bases de datos	SQL directo (SQLite) o TCP (PostgreSQL)	Conexión nativa, sin ORM pesado.
+10. Resumen de Stack por Componente
+Componente	Lenguaje	Frameworks/Librerías Clave
+Orquestador	Python 3.12	FastAPI, gRPC, PyTorch, NetworkX, Qdrant, SQLAlchemy, Scapy, Impacket
+Agente de campo (estándar)	Go 1.22	gorilla/websocket, protobuf, uTLS, garble
+Agente pesado (rootkit)	Rust + Go	windows-rs, linux-kernel-module, embed
+eBPF	C / Rust (libbpf-rs)	libbpf, clang
+Dashboard web	TypeScript + React	Vite, Cytoscape.js, gRPC-Web, Xterm.js
+CLI operador	Python (Textual)	gRPC, Rich
+Base de datos local	SQLite + Qdrant	SQLAlchemy, qdrant-client
+Base de datos central	PostgreSQL 16	SQLAlchemy, asyncpg
+C2 canal principal	WebSocket + Protobuf	gorilla/websocket, uTLS
+Comunicación interna	gRPC + Protobuf	grpcio, grpcio-tools

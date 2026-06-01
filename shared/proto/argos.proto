@@ -1,0 +1,280 @@
+syntax = "proto3";
+package argos;
+option go_package = "github.com/argos/shared/proto;argospb";
+
+// ─────────────────────────── SERVICES ───────────────────────────
+
+service AgentC2 {
+    rpc Register(AgentInfo)                       returns (RegisterAck);
+    rpc Beacon(stream AgentEvent)                 returns (stream DirectorCommand);
+    rpc ReportFinding(Finding)                    returns (FindingAck);
+}
+
+service OperatorConsole {
+    rpc WatchMission(MissionRequest)              returns (stream MissionUpdate);
+    rpc ResolveDecision(DecisionResponse)         returns (DecisionAck);
+    rpc SetMode(ModeChange)                       returns (ModeAck);
+    rpc ExecuteCommand(ManualCommand)             returns (CommandResult);
+    rpc GetWorldGraph(WorldGraphRequest)          returns (WorldGraphSnapshot);
+}
+
+// ─────────────────────────── ENUMS ───────────────────────────────
+
+enum ExecutionProfile {
+    GHOST    = 0;
+    BALANCED = 1;
+    BLITZ    = 2;
+}
+
+enum EventType {
+    HEARTBEAT        = 0;
+    SCAN_RESULT      = 1;
+    EXPLOIT_RESULT   = 2;
+    CREDENTIAL_FOUND = 3;
+    FLAG_CAPTURED    = 4;
+    DEFENSE_ALERT    = 5;
+    MODULE_LOADED    = 6;
+    ERROR            = 7;
+}
+
+enum CommandType {
+    SCAN          = 0;
+    EXPLOIT       = 1;
+    PERSIST       = 2;
+    EXFIL         = 3;
+    PIVOT         = 4;
+    CLEANUP       = 5;
+    DEPLOY_MODULE = 6;
+    SLEEP         = 7;
+    SELF_DESTRUCT = 8;
+}
+
+enum FindingType {
+    HOST_DISCOVERED   = 0;
+    SERVICE_OPEN      = 1;
+    CREDENTIAL        = 2;
+    VULNERABILITY     = 3;
+    FLAG              = 4;
+    DEFENSE_DETECTED  = 5;
+}
+
+// ─────────────────────────── AGENT MESSAGES ──────────────────────
+
+message AgentInfo {
+    string agent_id            = 1;
+    string hostname            = 2;
+    string os                  = 3;
+    string arch                = 4;
+    string ip                  = 5;
+    string internal_ip         = 6;
+    repeated string processes  = 7;
+    map<string, string> meta   = 8;
+    string version             = 9;
+    int64  timestamp           = 10;
+}
+
+message RegisterAck {
+    bool   success             = 1;
+    uint32 beacon_interval_sec = 2;
+    string mission_id          = 3;
+    string director_version    = 4;
+    ExecutionProfile profile   = 5;
+}
+
+message AgentEvent {
+    string    agent_id         = 1;
+    EventType type             = 2;
+    int64     timestamp        = 3;
+    oneof event {
+        ScanResult      scan    = 4;
+        ExploitResult   exploit = 5;
+        CredentialFound cred    = 6;
+        FlagCaptured    flag    = 7;
+        DefenseAlert    defense = 8;
+        Heartbeat       hb      = 9;
+    }
+}
+
+message Heartbeat {
+    float cpu_usage    = 1;
+    float mem_usage    = 2;
+    bool  is_elevated  = 3;
+}
+
+message ScanResult {
+    string target_ip       = 1;
+    repeated ServiceInfo services = 2;
+    string os_guess        = 3;
+}
+
+message ServiceInfo {
+    uint32 port      = 1;
+    string protocol  = 2;
+    string name      = 3;
+    string banner    = 4;
+    string version   = 5;
+    string cpe       = 6;
+}
+
+message ExploitResult {
+    string cve_or_technique = 1;
+    bool   success          = 2;
+    string session_id       = 3;
+    string output           = 4;
+    string error            = 5;
+}
+
+message CredentialFound {
+    string username  = 1;
+    string type      = 2;   // password, ntlm_hash, kerberos_ticket, ssh_key
+    string value     = 3;
+    string source    = 4;
+    string scope     = 5;   // local, domain
+}
+
+message FlagCaptured {
+    string value     = 1;
+    string path      = 2;
+    string host_id   = 3;
+}
+
+message DefenseAlert {
+    string type      = 1;   // edr, waf, honeypot, ids
+    string name      = 2;
+    float  severity  = 3;
+    string detail    = 4;
+}
+
+// ─────────────────────────── DIRECTOR COMMANDS ───────────────────
+
+message DirectorCommand {
+    string         command_id = 1;
+    CommandType    type       = 2;
+    ExecutionProfile profile  = 3;
+    int32          timeout_s  = 4;
+    oneof payload {
+        ScanCommand      scan_cmd    = 5;
+        ExploitCommand   exploit_cmd = 6;
+        PersistCommand   persist_cmd = 7;
+        ExfilCommand     exfil_cmd   = 8;
+        PivotCommand     pivot_cmd   = 9;
+        CleanupCommand   cleanup_cmd = 10;
+        DeployCommand    deploy_cmd  = 11;
+        SleepCommand     sleep_cmd   = 12;
+    }
+}
+
+message ScanCommand {
+    repeated string targets = 1;
+    string scan_type        = 2;   // tcp_syn, http_banner, smb, ldap, udp
+    int32  rate             = 3;
+    repeated uint32 ports   = 4;
+}
+
+message ExploitCommand {
+    string target_host  = 1;
+    uint32 target_port  = 2;
+    string technique    = 3;
+    string cve          = 4;
+    map<string, string> params = 5;
+}
+
+message PersistCommand {
+    string method       = 1;   // com_hijack, wmi, registry, cron, systemd
+    string payload_path = 2;
+    bool   elevate      = 3;
+}
+
+message ExfilCommand {
+    repeated string paths = 1;
+    string c2_endpoint    = 2;
+    bool   encrypt        = 3;
+}
+
+message PivotCommand {
+    string target_network = 1;
+    string method         = 2;   // socks5, ssh_tunnel, smb
+}
+
+message CleanupCommand {
+    bool remove_persistence = 1;
+    bool clear_logs         = 2;
+    bool self_delete        = 3;
+}
+
+message DeployCommand {
+    string module_name  = 1;
+    bytes  module_data  = 2;   // binario en memoria
+    map<string, string> params = 3;
+}
+
+message SleepCommand {
+    uint32 duration_sec = 1;
+    bool   jitter       = 2;
+}
+
+// ─────────────────────────── FINDINGS ────────────────────────────
+
+message Finding {
+    string      agent_id    = 1;
+    FindingType type        = 2;
+    string      description = 3;
+    bytes       evidence    = 4;
+    string      flag_value  = 5;
+    int64       timestamp   = 6;
+}
+
+message FindingAck {
+    bool   accepted = 1;
+    string node_id  = 2;
+}
+
+// ─────────────────────────── OPERATOR CONSOLE ────────────────────
+
+message MissionRequest {
+    string mission_id = 1;
+}
+
+message MissionUpdate {
+    string event_type = 1;
+    string payload    = 2;   // JSON serializado del evento
+    int64  timestamp  = 3;
+}
+
+message DecisionResponse {
+    string decision_id = 1;
+    bool   approved    = 2;
+    string custom_cmd  = 3;
+}
+
+message DecisionAck {
+    bool   ok      = 1;
+    string message = 2;
+}
+
+message ModeChange {
+    ExecutionProfile profile = 1;
+    string mode              = 2;   // pentest | ctf
+}
+
+message ModeAck {
+    bool ok = 1;
+}
+
+message ManualCommand {
+    string agent_id = 1;
+    string command  = 2;
+}
+
+message CommandResult {
+    string output = 1;
+    string error  = 2;
+    bool   ok     = 3;
+}
+
+message WorldGraphRequest {}
+
+message WorldGraphSnapshot {
+    string graph_json = 1;   // JSON serializado del grafo NetworkX
+    int64  timestamp  = 2;
+}

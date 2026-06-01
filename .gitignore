@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+*.egg
+
+# Environment
+.env
+*.env.local
+
+# Data
+data/argos.db
+data/qdrant/*
+!data/qdrant/.gitkeep
+logs/*.log
+certs/*
+!certs/.gitkeep
+missions/*
+!missions/.gitkeep
+reports/*
+!reports/.gitkeep
+arsenal/output/*
+!arsenal/output/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Go artifacts
+agents/stager/stager.exe
+agents/stager/stager*
+agents/cell/cell.exe
+agents/cell/cell*
+session.txt

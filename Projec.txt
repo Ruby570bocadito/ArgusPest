@@ -1,0 +1,496 @@
+Proyecto "Argos" — Desarrollo y Planteamiento Completo
+1. Filosofía y Principios de Diseño
+text
+“Argos no reemplaza al pentester, lo multiplica.
+El humano piensa la estrategia; Argos ejecuta la táctica.”
+Principios:
+
+Autonomía táctica, supervisión estratégica: Argos decide el cómo; el operador decide el qué y el cuánto.
+
+Transparencia radical: cada decisión, fallo o éxito está registrado con su justificación.
+
+Adaptabilidad en tiempo real: si algo falla, busca alternativas antes de preguntar al operador.
+
+Amnesia post-compromiso: toda evidencia operacional se limpia al terminar.
+
+Memoria entre misiones: aprende de cada pentest para mejorar el siguiente.
+
+2. Arquitectura General del Sistema
+text
+┌─────────────────────────────────────────────────────────────────┐
+│                        OPERADOR HUMANO                          │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐   │
+│  │ Dashboard    │  │ CLI Interact │  │ Cola de Decisiones   │   │
+│  │ Web (React)  │  │  (Rich TUI)  │  │ (Human-in-the-loop) │   │
+│  └──────┬───────┘  └──────┬───────┘  └──────────┬───────────┘   │
+└─────────┼──────────────────┼─────────────────────┼──────────────┘
+          │                  │                     │
+          ▼                  ▼                     ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     ORQUESTADOR CENTRAL                          │
+│  ┌───────────────┐  ┌──────────────┐  ┌────────────────────┐    │
+│  │ Planificador  │  │ Motor Táctico│  │ Memoria Operacional│    │
+│  │ de Rutas      │  │ (RL + Heur) │  │ (Vector DB + SQL) │    │
+│  └───────┬───────┘  └──────┬───────┘  └─────────┬──────────┘    │
+│          │                 │                     │               │
+│  ┌───────┴─────────────────┴─────────────────────┴──────────┐   │
+│  │              Bus de Eventos y Comandos (gRPC)           │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   AGENTES DE CAMPO (Go/Rust)                     │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐        │
+│  │ Escáner  │  │ Explotador│  │ Pivote   │  │ Exfiltra │        │
+│  │ Pasivo   │  │ Activo   │  │ Lateral  │  │ dor      │        │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘        │
+│                                                                  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐        │
+│  │ Evasión  │  │ Persiste │  │ Keylog   │  │ Limpieza │        │
+│  │ Adaptat  │  │ ncia     │  │ ger      │  │ Forense  │        │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘        │
+└─────────────────────────────────────────────────────────────────┘
+3. Módulo de Descubrimiento y Modelado del Mundo
+3.1 Objetivo
+Construir un gemelo digital operacional del entorno objetivo, enriquecido progresivamente durante la operación.
+
+3.2 Fases del Descubrimiento
+Fase Pasiva (pre-contacto)
+
+Fuente	Información obtenida	Riesgo
+OSINT de DNS/Whois	Rangos IP, ASN, dominios	Nulo
+Shodan/Censys API	Servicios expuestos, versiones	Nulo
+LinkedIn/GitHub	Empleados, tecnologías, repos	Nulo
+Certificados TLS	Dominios internos, subdominios	Nulo
+Google Dorks	Documentos expuestos, paneles	Nulo
+Fase Semi-pasiva (contacto mínimo)
+
+Técnica	Información	Riesgo
+TCP SYN probe selectivo	Hosts vivos, puertos clave	Bajo
+Banner grabbing HTTP/SSL	Versiones exactas, tecnologías	Bajo
+Fingerprinting de servicios	OS, software, parches	Bajo
+Detección de WAF/IDS/EDR	Defensas activas	Bajo
+Fase Activa (post-compromiso inicial)
+
+Técnica	Información	Riesgo
+Enumeración de red interna	Segmentos, VLANs, DNS interno	Medio
+Reconocimiento de AD	Usuarios, grupos, SPNs, trust relationships	Medio
+Descubrimiento de shares SMB/NFS	Recursos compartidos, permisos	Medio
+Escaneo de servicios internos	Bases de datos, colas, APIs internas	Medio
+3.3 Modelo de Mundo (Grafo Vivo)
+json
+{
+  "world_model": {
+    "version": "1.3",
+    "last_updated": "2026-05-04T14:23:01Z",
+    "hosts": [
+      {
+        "id": "H-042",
+        "ip": "10.20.5.18",
+        "hostname": "SRV-DB-PROD-01",
+        "os": "Windows Server 2022",
+        "role": "database_server",
+        "asset_value": 90,
+        "defenses": ["crowdstrike_falcon", "windows_defender"],
+        "services": [
+          {"port": 1433, "service": "MSSQL", "version": "2022"},
+          {"port": 5985, "service": "WinRM"}
+        ],
+        "credentials_found": [
+          {"user": "svc_db_backup", "type": "ntlm_hash", "source": "H-018"}
+        ],
+        "sessions": ["S-003"],
+        "reachable_from": ["H-018", "H-022"],
+        "reachable_to": ["H-050", "H-051"]
+      }
+    ],
+    "trusts": [
+      {"from": "H-018", "to": "H-042", "type": "local_admin", "user": "svc_db_backup"}
+    ],
+    "defenses_detected": {
+      "crowdstrike_falcon": ["H-042", "H-001", "H-002"],
+      "elastic_edr": ["H-018", "H-022"],
+      "honeypots_suspected": ["H-099"]
+    },
+    "crown_jewels_identified": [
+      {"host": "H-042", "type": "database", "confidence": 0.95},
+      {"host": "H-001", "type": "domain_controller", "confidence": 1.0}
+    ]
+  }
+}
+3.4 Detección de Defensas (Fingerprinting Pasivo)
+Argos infiere la presencia de defensas sin lanzar una sola alerta:
+
+Indicador	Defensa inferida	Técnica de detección
+TTL de paquetes HTTP distinto al OS	WAF o proxy inverso	Análisis de diferencia TTL
+Respuesta 403 con cabeceras específicas	Cloudflare, Akamai	Fingerprinting de headers
+Puerto 443 responde TLS pero no HTTP	EDR con MITM TLS	TLS handshake sin HTTP
+Certificado TLS autofirmado con CA interna	Proxy corporativo	Análisis de cadena de certificados
+Latencia anómala en ciertos puertos	Honeypot o IDS en modo inline	Timing analysis
+Procesos *falcon*, *sentinel*, *defender*	EDR específico	Enumeración remota vía WMI/DCOM/RPC si hay credenciales
+4. Planificador de Rutas de Ataque
+4.1 Objetivo
+Dado un objetivo final (ej: extraer datos de la tabla clientes en 10.20.5.18), calcular las rutas de ataque factibles ordenadas por una métrica combinada.
+
+4.2 Algoritmo de Planificación
+Fase 1: Generación de Grafo de Ataque
+
+Nodos = hosts, servicios, credenciales, vulnerabilidades.
+
+Aristas = técnicas de explotación, movimiento lateral, escalado.
+
+Peso de arista = probabilidad de éxito × factor de sigilo.
+
+Fase 2: Búsqueda Multi-objetivo (A* modificado)
+
+Origen: punto de entrada actual (o "sin acceso" si es el inicio).
+
+Destino: objetivo final.
+
+Heurística: distancia al objetivo + valor de activos intermedios.
+
+Resultado: N rutas candidatas con métricas.
+
+Fase 3: Ranking de Rutas
+
+python
+# Pseudocódigo de la función de ranking
+def rank_route(route):
+    score = 0
+    for step in route:
+        # Probabilidad de éxito del paso
+        prob = step.estimated_success_probability()
+        # Factor de sigilo: 1.0 = completamente silencioso, 0.1 = muy ruidoso
+        stealth = step.stealth_factor()
+        # Valor acumulado de los activos comprometidos
+        value = step.asset_value_gained()
+
+        score += (prob * stealth * 0.4) + (value * 0.4) - (step.risk_of_detection * 0.2)
+
+    return score
+4.3 Ejemplo de Rutas Calculadas
+text
+OBJETIVO: Acceso a BD clientes en 10.20.5.18
+PUNTO DE PARTIDA: Acceso inicial en 10.20.1.10 (estación de trabajo, usuario local)
+
+RUTA A (prioridad 0.87):
+  1. Escalar a SYSTEM local en 10.20.1.10 (técnica: UAC bypass)
+  2. Robar token de sesión RDP de administrador
+  3. Pivotar a 10.20.1.5 (servidor de saltos) vía Pass-the-Hash
+  4. Enumerar AD → encontrar svc_db_backup
+  5. Kerberoasting → crackear password de svc_db_backup
+  6. Conectar a 10.20.5.18 vía WinRM con credencial svc_db_backup
+  Estimación: 6 pasos, riesgo medio, 45 minutos
+
+RUTA B (prioridad 0.62):
+  1. Movimiento lateral a 10.20.5.22 (servidor web en mismo segmento que BD)
+  2. Explotar vulnerabilidad en aplicación web (CVE-2024-xxx)
+  3. Desde el servidor web, pivotar a la BD vía SQL injection interno
+  Estimación: 3 pasos, riesgo alto (exploit público), 20 minutos
+
+RUTA C (prioridad 0.41):
+  1. Phishing a administrador de BD identificado en LinkedIn
+  2. Reverse shell al recibir apertura
+  3. Acceso directo a la BD con credenciales del administrador
+  Estimación: 2 pasos, requiere interacción humana, riesgo bajo técnicamente
+4.4 Replanificación Dinámica
+Si un paso falla (ej: el exploit no funciona o la defensa bloquea el acceso), Argos:
+
+Evalúa si el fallo es definitivo o temporal.
+
+Si es definitivo, recalcula rutas excluyendo el paso fallido.
+
+Si es temporal, espera y reintenta con jitter exponencial.
+
+Solo consulta al operador si TODAS las rutas alternativas tienen riesgo > umbral configurado.
+
+5. Motor de Ejecución Táctica
+5.1 Ciclo de Ejecución
+text
+┌───────────────────────────────────────────┐
+│           BUCLE PRINCIPAL (60s)            │
+│                                           │
+│  1. Consultar Planificador → paso actual │
+│  2. ¿El paso requiere aprobación?         │
+│     SÍ → encolar decisión para operador   │
+│     NO → continuar                        │
+│  3. Ejecutar paso táctico                │
+│  4. Evaluar resultado                     │
+│     ÉXITO → actualizar Modelo de Mundo    │
+│     FALLO → registrar y notificar         │
+│  5. ¿Objetivo conseguido?                 │
+│     SÍ → notificar operador               │
+│     NO → volver a 1                       │
+└───────────────────────────────────────────┘
+5.2 Árboles de Decisión por Escenario
+Argos contiene playbooks tácticos para cada situación común, con árboles de decisión predefinidos que no requieren consultar al orquestador:
+
+Ejemplo: Explotación de un servicio web
+
+text
+1. Intentar credenciales por defecto (lista interna)
+   ├── Éxito → continuar post-explotación
+   └── Fallo →
+2. Intentar vulnerabilidades conocidas (CVEs mapeados a versión)
+   ├── Éxito → continuar
+   └── Fallo →
+3. Intentar inyección SQL / comando genérica
+   ├── Éxito → continuar
+   └── Fallo →
+4. Intentar fuerza bruta con diccionario adaptado al contexto
+   ├── Éxito → continuar
+   └── Fallo → notificar al orquestador "no se pudo explotar servicio web en H-XXX"
+Ejemplo: Escalada de privilegios en Windows
+
+text
+1. ¿Es Administrador local? → SÍ, saltar a paso de persistencia
+2. Enumerar privilegios de token (SeImpersonate, SeDebug, etc.)
+   ├── SeImpersonatePrivilege → intentar Potato attack
+   │   ├── Éxito → ya es SYSTEM
+   │   └── Fallo → siguiente
+   └── SeDebugPrivilege → inyectar en proceso SYSTEM
+3. Enumerar servicios vulnerables (PowerUp / WinPEAS)
+   ├── Servicio con permisos de escritura → modificar binario
+   ├── Unquoted service path → exploit
+   └── ...
+4. Buscar credenciales en archivos (SAM, LSA secrets, creds de navegador)
+   ├── Encontradas → intentar con ellas
+   └── No encontradas → notificar al orquestador
+5.3 Gestión de Errores y Reintentos
+Tipo de fallo	Acción automática	¿Notifica al operador?
+Error de conexión (timeout)	Reintentar 3x con backoff exponencial	No
+Credencial incorrecta	Marcar credencial como inválida, probar siguiente	No
+Exploit falla	Probar variante, luego siguiente exploit	No
+EDR bloquea acción	Activar evasión mejorada, reubicar C2	Sí (riesgo medio)
+Honeypot detectado	Marcar host como peligroso, evitar segmento	Sí (riesgo alto)
+3 rutas alternativas agotadas	Solicitar instrucciones al operador	Sí (bloqueante)
+6. Sistema de Cola de Decisiones (Human-in-the-Loop)
+6.1 Tipos de Decisiones que se Encolan
+Nivel	Gatillo	Ejemplo	Tiempo máximo de espera
+🟢 Bajo	Información, no requiere acción	"Se encontró un honeypot en 10.20.5.99"	No aplica
+🟡 Medio	Decisión con riesgo moderado	"¿Usar exploit público en servidor de producción?"	30 minutos
+🔴 Alto	Decisión con riesgo grave	"¿Robar NTDS.dit del Domain Controller?"	60 minutos
+⚫ Crítico	Punto de no retorno	"¿Lanzar ataque DoS como distracción?"	Requiere confirmación expresa
+6.2 Formato de cada Decisión Encolada
+text
+╔══════════════════════════════════════════════════════════════╗
+║ DECISIÓN #042 — 🟡 RIESGO MEDIO                            ║
+╠══════════════════════════════════════════════════════════════╣
+║ Contexto: Se ha encontrado el servidor MSSQL en 10.20.5.18 ║
+║           (SRV-DB-PROD-01) con la versión 2022.            ║
+║                                                             ║
+║ Acción propuesta: Usar exploit CVE-2024-xxxx para obtener  ║
+║                   ejecución remota de comandos.             ║
+║                                                             ║
+║ Probabilidad de éxito: 78%                                  ║
+║ Riesgo de detección:   45% (EDR CrowdStrike presente)      ║
+║ Impacto si falla:      Posible alerta en SOC, no debería   ║
+║                        tumbar el servicio.                  ║
+║ Recompensa:            Acceso a la base de datos maestra   ║
+║                        con datos de clientes (valor: 90)   ║
+║                                                             ║
+║ Alternativas:                                               ║
+║  [A] Intentar fuerza bruta (riesgo bajo, lento)            ║
+║  [B] Buscar otro vector desde servidor web (riesgo medio)  ║
+║  [C] Proceder con el exploit ahora (riesgo medio)          ║
+║                                                             ║
+║ Tu elección (A/B/C) o escribe un comando personalizado:    ║
+╚══════════════════════════════════════════════════════════════╝
+6.3 Política por Defecto (si el operador no responde)
+Nivel	Acción por defecto
+🟢 Bajo	Continuar automáticamente
+🟡 Medio	Esperar 30 min, luego elegir la opción más conservadora
+🔴 Alto	Esperar 60 min, luego ABORTAR ese camino y tomar ruta alternativa
+⚫ Crítico	ABORTAR y esperar indefinidamente al operador
+7. Memoria Operacional y Aprendizaje
+7.1 Base de Conocimiento
+Argos almacena todo lo aprendido en cada pentest:
+
+Datos estructurados (SQLite)
+
+text
+Tablas:
+- exploits: id, cve, software, version, fecha_exito, fecha_fracaso, entorno
+- credenciales_comunes: servicio, usuario, password, frecuencia
+- defensas_encontradas: edr, version, tecnicas_que_funcionaron, tecnicas_que_fallaron
+- rutas_exitosas: origen, destino, pasos, tiempo_total, operador
+- falsos_positivos: ip, servicio, motivo
+Datos no estructurados (Vector Database)
+
+Embeddings de banners de servicios mapeados a vulnerabilidades.
+
+Embeddings de respuestas HTTP para detección de WAF/IDS.
+
+Embeddings de configuraciones de red para identificación de patrones.
+
+7.2 Aprendizaje entre Misiones
+Al iniciar un nuevo pentest, Argos consulta su memoria:
+
+Si en misiones anteriores...	Entonces ahora...
+El exploit X funcionó en MSSQL 2022 con parche Y	Prioriza ese exploit
+El EDR CrowdStrike detectó la técnica Z	Evita Z y prueba variantes
+La red objetivo usa segmentación 10.X.0.0/16	Asume segmentación similar y planifica pivotes
+Los administradores usan contraseñas tipo Empresa+ Año	Prueba ese patrón antes que otros diccionarios
+7.3 Feedback del Operador como Supervisión
+Cuando el operador rechaza una decisión de Argos, el sistema registra:
+
+Qué decisión tomó el humano.
+
+En qué contexto.
+
+Resultado final.
+
+Con suficientes interacciones, Argos afina su modelo de riesgo/beneficio para alinearse con el estilo del operador (más agresivo, más conservador, etc.).
+
+8. Auto-Reportería
+8.1 Tipos de Informe Generados
+Informe	Audiencia	Contenido
+Ejecutivo	Dirección/CISO	Resumen de hallazgos, riesgo global, recomendaciones priorizadas, gráficos
+Técnico	Equipo de seguridad	Timeline detallado, técnicas usadas, evidencias, contramedidas específicas
+ATT&CK JSON	Analistas	Mapeo completo a MITRE ATT&CK v15, técnicas, tácticas, procedimientos
+Evidencias	Auditoría	Capturas de pantalla, hashes, logs exportados, archivos robados
+Lecciones Aprendidas	Interno (Red Team)	Qué funcionó, qué falló, mejoras para la próxima
+8.2 Generación Automática
+Argos genera los informes sin intervención del operador al finalizar la misión (o bajo demanda).
+
+Pipeline de generación:
+
+Recopilar todos los eventos del Bus de Eventos.
+
+Filtrar por relevancia (excluir reintentos fallidos, ruido interno).
+
+Agrupar por táctica MITRE ATT&CK.
+
+Para cada hallazgo, buscar en la base de conocimiento la recomendación de remediación estándar.
+
+Renderizar con plantillas (LaTeX para PDF, JSON para ATT&CK).
+
+9. Interfaz de Operador
+9.1 Dashboard Web
+Vista principal: "Mapa de Operación"
+
+Grafo interactivo de la red objetivo.
+
+Nodos coloreados por estado: verde (comprometido), amarillo (en progreso), rojo (fallido), azul (objetivo final).
+
+Aristas etiquetadas con la técnica de movimiento.
+
+Timeline vertical con eventos recientes.
+
+Panel lateral izquierdo: "Objetivos y Rutas"
+
+Objetivo actual y % de completitud.
+
+Rutas alternativas con ranking.
+
+Botón "Pausar", "Reanudar", "Abortar".
+
+Panel lateral derecho: "Cola de Decisiones"
+
+Lista de decisiones pendientes.
+
+Cada una con icono de nivel y temporizador.
+
+9.2 CLI Interactiva
+bash
+$ argos connect --mission acmecorp-2026-05
+
+[Argos v1.0] Conectado a la misión 'acmecorp-2026-05'
+[Argos] Estado: EN PROGRESO — Ruta A — Paso 3/6
+[Argos] Último evento: Credencial svc_db_backup validada en 10.20.5.18
+
+argos> status
+╔══════════════════════════════════════════════════════════╗
+║ MISIÓN: acmecorp-2026-05                                ║
+║ Objetivo: Acceso BD clientes en 10.20.5.18              ║
+║ Progreso: 3/6 pasos (50%)                               ║
+║ Hosts comprometidos: 12                                 ║
+║ Credenciales descubiertas: 5                            ║
+║ Riesgo actual: MEDIO (EDR CrowdStrike en segmento BD)   ║
+╚══════════════════════════════════════════════════════════╝
+
+argos> decisions
+╔══════════════════════════════════════════════════════════╗
+║ DECISIONES PENDIENTES (1)                               ║
+║ [#042] 🟡 MEDIO — Explotar MSSQL en 10.20.5.18          ║
+║        Opciones: [A] Brute [B] Alternativa [C] Exploit  ║
+╚══════════════════════════════════════════════════════════╝
+
+argos> decide 042 C
+[Argos] Decisión registrada. Ejecutando exploit CVE-2024-xxxx...
+[Argos] Exploit exitoso. Shell obtenida en 10.20.5.18.
+[Argos] Paso 4/6 completado. Continuando con paso 5...
+
+argos> report --type executive --output ./informes/
+[Argos] Generando informe ejecutivo...
+[Argos] Informe guardado en ./informes/acmecorp-2026-05_ejecutivo.pdf
+10. Integración con el Ecosistema Existente
+Argos no es una isla. Se integra con:
+
+Herramienta	Propósito
+Wormy	Módulo de propagación autónoma heredado para fases de movimiento lateral masivo
+Rootkits (tu proyecto)	Payloads de persistencia y sigilo en objetivos de alto valor
+BloodHound	Importación/exportación de grafos de Active Directory
+Nuclei	Escaneo de vulnerabilidades web
+Mythic / Sliver	Agentes C2 alternativos que Argos puede desplegar
+Metasploit	Exploits de reserva vía MSFRPC
+Impacket	Movimiento lateral Windows
+Hashcat	Crackeo de hashes offline con GPU
+11. Roadmap de Desarrollo Sugerido
+Fase 1 — Fundación (3 meses)
+
+Orquestador central con Bus de Eventos.
+
+Agente de escaneo y enumeración pasiva.
+
+Modelo de Mundo básico.
+
+Dashboard web mínimo.
+
+Soporte para 1 plataforma (Linux).
+
+Fase 2 — Ejecución Autónoma (3 meses)
+
+Motor de explotación con 10 módulos.
+
+Planificador de rutas A*.
+
+Sistema de cola de decisiones.
+
+Memoria operacional con SQLite.
+
+Soporte para Windows.
+
+Fase 3 — Madurez (4 meses)
+
+Aprendizaje entre misiones (Vector DB).
+
+Auto-Reportería completa.
+
+Playbooks de escalada y pivoteo.
+
+Evasión adaptativa según defensas.
+
+CLI interactiva.
+
+Fase 4 — Producto (2 meses)
+
+Multi-usuario con RBAC.
+
+API REST para terceros.
+
+Modo "entrenamiento" en laboratorios.
+
+Exportación a formatos estándar (ATT&CK, D3FEND).
+
+Documentación y playbooks de operador.
+
+12. ¿Por qué este proyecto rompe el statu quo?
+No existe un auto pentester real: Las herramientas actuales son lanzaderas de exploits o frameworks de C2, no planificadores autónomos.
+
+Combina IA simbólica (planificación de grafos) con IA conexionista (embeddings, aprendizaje): Argos sabe qué hacer y cómo priorizar según la experiencia acumulada.
+
+Respeta al operador humano: No lo elimina, lo convierte en director de orquesta en lugar de músico.
+
+Resuelve el cuello de botella del Red Team: La escasez de talento ofensivo senior se mitiga con automatización inteligente.

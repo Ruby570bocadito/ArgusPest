@@ -1,0 +1,96 @@
+# ─────────────────────────────────────────────────────────────────
+# Argos — Global Configuration
+# ─────────────────────────────────────────────────────────────────
+
+argos:
+  version: "2.0.0"
+
+# ── Director ──────────────────────────────────────────────────────
+director:
+  default_profile: balanced          # ghost | balanced | blitz
+  default_mode: pentest              # pentest | ctf
+  max_parallel_agents: 5
+  decision_timeout_sec: 300          # 5 min → auto-rechaza si no hay respuesta
+  auto_decide_max_risk: 0.6          # auto-aprueba si risk < este valor
+  output_dir: ./missions
+
+# ── C2 Server ─────────────────────────────────────────────────────
+c2:
+  host: "0.0.0.0"
+  grpc_port: 50051
+  http_port: 8443
+  tls: true
+  cert_file: ./certs/server.crt
+  key_file:  ./certs/server.key
+  beacon_intervals:
+    ghost:    120
+    balanced: 60
+    blitz:    15
+
+# ── Dashboard ─────────────────────────────────────────────────────
+dashboard:
+  host: "127.0.0.1"
+  port: 3000
+  jwt_secret: "CHANGE_ME_IN_PRODUCTION"
+  jwt_expiry_hours: 8
+
+# ── Database ──────────────────────────────────────────────────────
+database:
+  sqlite_path: ./data/argos.db
+  qdrant_path: ./data/qdrant
+
+# ── CBR / ML ──────────────────────────────────────────────────────
+cbr:
+  model: "all-MiniLM-L6-v2"
+  top_k: 5
+  min_similarity: 0.65
+
+# ── Global Defense State ──────────────────────────────────────────
+gds:
+  kill_threshold: 0.90
+  decay_interval_sec: 30
+  decay_amount: 0.02
+
+# ── Metasploit (opcional) ─────────────────────────────────────────
+metasploit:
+  enabled: false
+  host: "127.0.0.1"
+  port: 55553
+  password: "changeme"
+  ssl: false
+
+# ── Logging ───────────────────────────────────────────────────────
+logging:
+  level: INFO                        # DEBUG | INFO | WARNING | ERROR
+  format: "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
+  file: ./logs/argos.log
+  max_bytes: 10485760                # 10 MB
+  backup_count: 5
+
+# ── Profiles ──────────────────────────────────────────────────────
+profiles:
+  ghost:
+    confidence_threshold: 0.85
+    stealth_weight: 0.80
+    max_noise_level: 0.3
+    ask_everything: true
+
+  balanced:
+    confidence_threshold: 0.65
+    stealth_weight: 0.50
+    max_noise_level: 0.6
+    ask_everything: false
+
+  blitz:
+    confidence_threshold: 0.35
+    stealth_weight: 0.10
+    max_noise_level: 1.0
+    ask_everything: false
+
+# ── CTF Mode ──────────────────────────────────────────────────────
+ctf:
+  flag_regex: "CTF\\{[^}]+\\}"
+  auto_submit: false
+  ctfd_url: ""
+  ctfd_token: ""
+  defensive_shield: false

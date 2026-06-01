@@ -1,0 +1,129 @@
+# ─────────────────────────────────────────────────────────────────
+# Argos Lab — Docker Compose (entorno vulnerable para pruebas)
+# Compatible con Docker y Podman (podman-compose)
+# Uso: docker-compose -f tests/docker-compose-lab.yml up -d
+# ─────────────────────────────────────────────────────────────────
+
+networks:
+  argos_lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.100.0.0/24
+
+services:
+
+  # ── ATTACKER (Argos Orchestrator) ──────────────────────────────
+  argos_director:
+    image: python:3.12-slim
+    container_name: argos_director
+    networks:
+      argos_lab:
+        ipv4_address: 10.100.0.10
+    volumes:
+      - ../:/app
+    working_dir: /app
+    environment:
+      - ARGOS_C2_HOST=0.0.0.0
+      - ARGOS_C2_GRPC_PORT=50051
+      - ARGOS_TLS=false
+      - ARGOS_LOG_LEVEL=DEBUG
+    command: >
+      bash -c "pip install -q -r requirements.txt &&
+               python main.py"
+    ports:
+      - "50051:50051"
+      - "8443:8443"
+
+  # ── TARGET: Apache 2.4.49 (vulnerable a CVE-2021-41773) ────────
+  web_apache_vuln:
+    image: httpd:2.4.49
+    container_name: web_apache_vuln
+    networks:
+      argos_lab:
+        ipv4_address: 10.100.0.20
+    ports:
+      - "8080:80"
+    labels:
+      argos.role: "target"
+      argos.vulns: "CVE-2021-41773"
+
+  # ── TARGET: SSH con credenciales débiles ────────────────────────
+  ssh_weak:
+    image: linuxserver/openssh-server:latest
+    container_name: ssh_weak
+    networks:
+      argos_lab:
+        ipv4_address: 10.100.0.21
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - USER_NAME=admin
+      - USER_PASSWORD=admin123
+      - PASSWORD_ACCESS=true
+    ports:
+      - "2222:2222"
+    labels:
+      argos.role: "target"
+      argos.vulns: "weak_credentials"
+
+  # ── TARGET: MySQL sin contraseña ────────────────────────────────
+  mysql_noauth:
+    image: mysql:5.7
+    container_name: mysql_noauth
+    networks:
+      argos_lab:
+        ipv4_address: 10.100.0.22
+    environment:
+      - MYSQL_ALLOW_EMPTY_PASSWORD=yes
+      - MYSQL_DATABASE=test
+    ports:
+      - "3306:3306"
+    labels:
+      argos.role: "target"
+      argos.vulns: "no_auth"
+
+  # ── TARGET: FTP vsftpd 2.3.4 (backdoor) ────────────────────────
+  ftp_vsftpd_backdoor:
+    image: alpine:3.19
+    container_name: ftp_vsftpd_backdoor
+    networks:
+      argos_lab:
+        ipv4_address: 10.100.0.23
+    command: >
+      sh -c "apk add --no-cache vsftpd &&
+             echo 'anonymous_enable=YES' >> /etc/vsftpd/vsftpd.conf &&
+             vsftpd /etc/vsftpd/vsftpd.conf &&
+             tail -f /dev/null"
+    ports:
+      - "2121:21"
+    labels:
+      argos.role: "target"
+      argos.vulns: "anonymous_login"
+
+  # ── TARGET: Redis sin autenticación ────────────────────────────
+  redis_noauth:
+    image: redis:6.2-alpine
+    container_name: redis_noauth
+    networks:
+      argos_lab:
+        ipv4_address: 10.100.0.24
+    command: redis-server --protected-mode no
+    ports:
+      - "6379:6379"
+    labels:
+      argos.role: "target"
+      argos.vulns: "no_auth"
+
+  # ── TARGET: DVWA (Damn Vulnerable Web App) ──────────────────────
+  dvwa:
+    image: vulnerables/web-dvwa:latest
+    container_name: dvwa
+    networks:
+      argos_lab:
+        ipv4_address: 10.100.0.25
+    ports:
+      - "8888:80"
+    labels:
+      argos.role: "target"
+      argos.vulns: "sqli,xss,rfi,lfi"

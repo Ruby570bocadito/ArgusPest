@@ -1,0 +1,160 @@
+# ─────────────────────────────────────────────────────────────────
+# Argos Lab — Docker Compose v2 (entorno vulnerable para pruebas)
+# Redes separadas: attack (orchestrator) y targets (vulnerable)
+# Uso: docker compose -f tests/docker-compose-lab-v2.yml up -d
+# ─────────────────────────────────────────────────────────────────
+
+networks:
+  argos_attack:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.100.0.0/24
+  argos_targets:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.100.1.0/24
+  argos_monitoring:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.100.2.0/24
+
+services:
+
+  # ── ATTACKER: Argos Orchestrator con tests ──────────────────────
+  argos_director:
+    image: python:3.12-slim
+    container_name: argos_director
+    networks:
+      argos_attack:
+        ipv4_address: 10.100.0.10
+      argos_targets:
+        ipv4_address: 10.100.1.10
+    volumes:
+      - ../:/app
+    working_dir: /app
+    environment:
+      - ARGOS_C2_HOST=0.0.0.0
+      - ARGOS_C2_GRPC_PORT=50051
+      - ARGOS_TLS=false
+      - ARGOS_LOG_LEVEL=DEBUG
+      - PYTHONDONTWRITEBYTECODE=1
+    command: >
+      bash -c "
+        pip install -q -r requirements.txt pytest pytest-asyncio pytest-cov &&
+        echo '=== Running Unit Tests ===' &&
+        python -m pytest tests/ -v --tb=short -k 'not cbr' &&
+        echo '=== Running Demo Integration ===' &&
+        python tests/demo_integration.py &&
+        echo '=== All Tests Passed ==='
+      "
+    ports:
+      - "50051:50051"
+      - "8443:8443"
+    depends_on:
+      - web_apache_vuln
+      - ssh_weak
+      - mysql_noauth
+      - redis_noauth
+
+  # ── TARGET: Apache 2.4.49 (CVE-2021-41773) ─────────────────────
+  web_apache_vuln:
+    image: httpd:2.4.49
+    container_name: web_apache_vuln
+    networks:
+      argos_targets:
+        ipv4_address: 10.100.1.20
+    ports:
+      - "8080:80"
+    labels:
+      argos.role: "target"
+      argos.vulns: "CVE-2021-41773"
+      argos.difficulty: "easy"
+      argos.points: "100"
+
+  # ── TARGET: SSH weak credentials ────────────────────────────────
+  ssh_weak:
+    image: linuxserver/openssh-server:latest
+    container_name: ssh_weak
+    networks:
+      argos_targets:
+        ipv4_address: 10.100.1.21
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - USER_NAME=admin
+      - USER_PASSWORD=admin123
+      - PASSWORD_ACCESS=true
+    ports:
+      - "2222:2222"
+    labels:
+      argos.role: "target"
+      argos.vulns: "weak_credentials"
+      argos.difficulty: "easy"
+      argos.points: "50"
+
+  # ── TARGET: MySQL no auth ───────────────────────────────────────
+  mysql_noauth:
+    image: mysql:5.7
+    container_name: mysql_noauth
+    networks:
+      argos_targets:
+        ipv4_address: 10.100.1.22
+    environment:
+      - MYSQL_ALLOW_EMPTY_PASSWORD=yes
+      - MYSQL_DATABASE=test
+      - MYSQL_ROOT_PASSWORD=
+    ports:
+      - "3306:3306"
+    labels:
+      argos.role: "target"
+      argos.vulns: "no_auth"
+      argos.difficulty: "easy"
+      argos.points: "75"
+
+  # ── TARGET: Redis no auth ───────────────────────────────────────
+  redis_noauth:
+    image: redis:7-alpine
+    container_name: redis_noauth
+    networks:
+      argos_targets:
+        ipv4_address: 10.100.1.24
+    command: redis-server --protected-mode no
+    ports:
+      - "6379:6379"
+    labels:
+      argos.role: "target"
+      argos.vulns: "no_auth"
+      argos.difficulty: "easy"
+      argos.points: "100"
+
+  # ── TARGET: DVWA (Damn Vulnerable Web App) ──────────────────────
+  dvwa:
+    image: vulnerables/web-dvwa:latest
+    container_name: dvwa
+    networks:
+      argos_targets:
+        ipv4_address: 10.100.1.25
+    ports:
+      - "8888:80"
+    labels:
+      argos.role: "target"
+      argos.vulns: "sqli,xss,rfi,lfi"
+      argos.difficulty: "medium"
+      argos.points: "200"
+
+  # ── MONITORING: Network traffic capture (optional) ──────────────
+  # Uncomment to enable network monitoring
+  # network_monitor:
+  #   image: nicolaka/netshoot:latest
+  #   container_name: network_monitor
+  #   networks:
+  #     argos_attack:
+  #     argos_targets:
+  #   command: >
+  #     bash -c "tcpdump -i any -w /tmp/capture.pcap &
+  #              tail -f /dev/null"
+  #   volumes:
+  #     - ./captures:/tmp
