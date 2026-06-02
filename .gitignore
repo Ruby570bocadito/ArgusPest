@@ -40,6 +40,13 @@ Thumbs.db
 htmlcov/
 .coverage
 
+# Implementation notes / planning documents
+*IMPLEMENTACION*.txt
+*Projec*.txt
+*Tecnologi*.txt
+*Project*.txt
+sharessiont.xt
+
 # Go artifacts
 agents/stager/stager.exe
 agents/stager/stager*
