@@ -14,11 +14,11 @@
   <img src="https://img.shields.io/badge/license-MIT-red?style=for-the-badge&logo=github" />
   <img src="https://img.shields.io/badge/version-2.0.0-blue?style=for-the-badge&logo=semver" />
   <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=for-the-badge&logo=python" />
-  <img src="https://img.shields.io/badge/build-passing-brightgreen?style=for-the-badge&logo=githubactions" />
+  <img src="https://img.shields.io/github/actions/workflow/status/Ruby570bocadito/Titan-Operations/ci.yml?style=for-the-badge&logo=githubactions&label=build&branch=main" />
   <img src="https://img.shields.io/badge/go-1.22%2B-00ADD8?style=for-the-badge&logo=go" />
-  <img src="https://img.shields.io/badge/coverage-94%25-brightgreen?style=for-the-badge&logo=codecov" />
+  <img src="https://img.shields.io/badge/tests-%E2%89%A534%20passed-0A9EDC?style=for-the-badge&logo=pytest" />
   <img src="https://img.shields.io/badge/PRs-welcome-ff69b4?style=for-the-badge&logo=git" />
-  <img src="https://img.shields.io/badge/tested%20with-pytest-0A9EDC?style=for-the-badge&logo=pytest" />
+  <img src="https://img.shields.io/github/license/Ruby570bocadito/Titan-Operations?style=for-the-badge&labelColor=0d1117&color=red" />
 </p>
 
 ---
