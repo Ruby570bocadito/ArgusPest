@@ -155,7 +155,7 @@ class TestEventBus:
             await bus.emit("h2", {"b": 2})
             await bus.emit("h1", {"a": 3})
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
         history = bus.get_history("h1")
         assert len(history) == 2
         assert history[0]["data"]["a"] == 1
@@ -166,7 +166,7 @@ class TestEventBus:
             for i in range(10):
                 await bus.emit("evt", {"i": i})
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
         history = bus.get_history(limit=3)
         assert len(history) == 3
 

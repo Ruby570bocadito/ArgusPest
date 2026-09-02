@@ -133,7 +133,7 @@ class ArgosConsole(cmd.Cmd):
         ), bus=self.bus)
 
         cbr_ok  = self.director.cbr.enabled
-        msf_ok  = self.director.msf.connected if hasattr(self.director, 'msf') else False
+        msf_ok  = self.director.exploit_manager.msf.connected if hasattr(self.director, 'exploit_manager') else False
 
         engine_status = (
             f"  {G}[OK]{N} A* Planner       {D}(NetworkX, heuristic IP-distance){N}\n"

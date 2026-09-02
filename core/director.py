@@ -122,8 +122,11 @@ class Director:
         from core.exploit_manager import ExploitManager
         self.exploit_manager = ExploitManager(self, self.bus)
 
-        # Seed CBR with default knowledge
-        seed_default_cases(self.cbr)
+        # Seed CBR with default knowledge — solo si la colección está vacía,
+        # para no duplicar casos al re-instanciar el Director sobre el mismo output_dir.
+        cbr_stats = self.cbr.stats()
+        if cbr_stats.get("enabled") and cbr_stats.get("total_cases", 0) == 0:
+            seed_default_cases(self.cbr)
 
         # Register GDS kill-switch listener
         self.kt.gds.register_listener(self._on_kill_switch)
