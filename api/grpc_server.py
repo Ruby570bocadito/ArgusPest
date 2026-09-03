@@ -120,6 +120,25 @@ class ArgosAgentC2Servicer(argos_pb2_grpc.AgentC2Servicer):
         return None
 
     @staticmethod
+    def _stringify_params(params: dict) -> dict:
+        """Protobuf `ExploitCommand.params` es `map<string, string>`.
+        Convierte valores no-string (listas/tuplas/dicts de las reglas tácticas)
+        a su representación JSON para evitar TypeError al serializar."""
+        out = {}
+        for key, value in (params or {}).items():
+            if isinstance(value, str):
+                out[key] = value
+            elif isinstance(value, (int, float, bool)):
+                out[key] = str(value)
+            else:
+                # listas/tuplas/dicts → JSON compacto
+                try:
+                    out[key] = _json.dumps(value, default=str)
+                except (TypeError, ValueError):
+                    out[key] = str(value)
+        return out
+
+    @staticmethod
     def _finding_type_name(type_int: int) -> str:
         return {0: "HOST_DISCOVERED", 1: "SERVICE_OPEN", 2: "CREDENTIAL",
                 3: "VULNERABILITY", 4: "FLAG", 5: "DEFENSE_DETECTED"}.get(type_int, "UNKNOWN")
@@ -148,7 +167,7 @@ class ArgosAgentC2Servicer(argos_pb2_grpc.AgentC2Servicer):
                 target_host = cmd.get("target_host", ""),
                 technique   = cmd.get("action", ""),
                 cve         = cmd.get("cve", ""),
-                params      = cmd.get("params", {}),
+                params      = ArgosAgentC2Servicer._stringify_params(cmd.get("params", {})),
             ) if ctype == "EXPLOIT" else None,
             scan_cmd=argos_pb2.ScanCommand(
                 targets  = [cmd.get("params", {}).get("target", "")],

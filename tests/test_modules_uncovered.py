@@ -390,6 +390,7 @@ class TestAutoSubmitter:
         assert submitter.platform_url == "https://ctfd.example.com"
         assert submitter.api_token == "token123"
         assert submitter.submitted == []
+        assert submitter.verify_ssl is True  # TLS verification ON por defecto
 
     def test_init_trims_url(self):
         from ctf.flag_hunter import AutoSubmitter

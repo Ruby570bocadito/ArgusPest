@@ -187,6 +187,34 @@ class TestGrpcHelpers:
         assert result.command_id == "cmd2"
         assert result.type == 1  # Default to EXPLOIT
 
+    def test_stringify_params_non_string_values(self):
+        from api.grpc_server import ArgosAgentC2Servicer
+
+        params = {
+            "wordlist": "rockyou_top1000",                 # string → igual
+            "port": 445,                                   # int → str
+            "creds": [("root", "root"), ("admin", "admin")],  # list → JSON
+        }
+        out = ArgosAgentC2Servicer._stringify_params(params)
+        assert out["wordlist"] == "rockyou_top1000"
+        assert out["port"] == "445"
+        assert isinstance(out["creds"], str)
+        assert "root" in out["creds"]
+
+    def test_dict_to_director_command_exploit_stringifies_params(self):
+        from api.grpc_server import ArgosAgentC2Servicer
+
+        cmd = {
+            "type": "EXPLOIT",
+            "action": "ssh_default_credentials",
+            "target_host": "10.0.0.1",
+            "params": {"creds": [("root", "root"), ("admin", "admin")]},
+        }
+        # No debe lanzar TypeError: los params del proto son map<string,string>
+        result = ArgosAgentC2Servicer._dict_to_director_command(cmd)
+        assert result.type == 1
+        assert isinstance(result.exploit_cmd.params["creds"], str)
+
     def test_grpc_server_init(self):
         from api.grpc_server import GrpcServer
 

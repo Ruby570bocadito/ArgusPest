@@ -191,9 +191,10 @@ class AutoSubmitter:
     Soporta CTFd y plataformas compatibles.
     """
 
-    def __init__(self, platform_url: str, api_token: str) -> None:
+    def __init__(self, platform_url: str, api_token: str, verify_ssl: bool = True) -> None:
         self.platform_url = platform_url.rstrip("/")
         self.api_token    = api_token
+        self.verify_ssl   = verify_ssl
         self.submitted:   List[str] = []
 
     async def submit(self, flag_value: str, challenge_id: Optional[int] = None) -> dict:
@@ -208,7 +209,7 @@ class AutoSubmitter:
             if challenge_id:
                 payload["challenge_id"] = challenge_id
 
-            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=10.0) as client:
                 resp = await client.post(
                     f"{self.platform_url}/api/v1/challenges/attempt",
                     json=payload, headers=headers,
